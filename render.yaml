@@ -1,0 +1,15 @@
+# Render Blueprint - https://render.com/docs/blueprint-spec
+# Deploy: Dashboard -> New -> Blueprint -> connect this repo
+services:
+  - type: web
+    name: pulliq
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/analyze
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOSTNAME
+        value: 0.0.0.0
