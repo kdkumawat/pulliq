@@ -1,8 +1,12 @@
+# BACKUP ONLY - GitHub cron is best-effort and often runs every 45-90+ minutes,
+# NOT every 5 minutes. For reliable keep-alive, use UptimeRobot or cron-job.org
+# (see DEPLOYMENT.md). This workflow helps when GitHub does fire on time.
 name: Keep alive
 
 on:
   schedule:
-    - cron: "*/14 * * * *"
+    # Every 5 min at offset minutes (avoid top-of-hour queue). Still not guaranteed.
+    - cron: "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"
   workflow_dispatch:
 
 jobs:
