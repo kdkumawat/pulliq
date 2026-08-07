@@ -29,6 +29,34 @@ You could deploy **only the static frontend** to Vercel and run the API elsewher
 
 **Recommended for free:** Render (simplest) or Fly.io (more control).
 
+### Keep-alive (Render free tier)
+
+Render spins down after **15 minutes** without traffic. You need a ping **at least every 14 minutes**.
+
+**Do not rely on GitHub Actions cron alone.** Scheduled workflows are *best-effort* - GitHub often delays them 45-90+ minutes (your runs at 4:26, 5:13, 6:01, 7:26 are normal). See [GitHub docs](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule).
+
+#### Recommended: UptimeRobot (free, reliable)
+
+1. Sign up at [uptimerobot.com](https://uptimerobot.com)
+2. **Add monitor** → type **HTTP(s)**
+3. URL: `https://pulliq.onrender.com/api/analyze`
+4. Interval: **5 minutes**
+5. Save
+
+UptimeRobot pings on schedule and keeps Render awake.
+
+#### Alternative: cron-job.org
+
+1. [cron-job.org](https://cron-job.org) → create account
+2. Create cron job → URL `https://pulliq.onrender.com/api/analyze`
+3. Schedule: every **10 minutes** (or 5 if available)
+
+#### Backup: GitHub Actions workflow
+
+`.github/workflows/keep-alive.yml` pings when GitHub actually runs it (unreliable). Use **Run workflow** manually or keep it as a bonus - not your primary keep-alive.
+
+**Trade-off:** A warm instance uses your **750 free instance hours/month** (~720 h if always on).
+
 ## Prerequisites
 
 The app requires these system binaries at runtime:
