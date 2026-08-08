@@ -40,8 +40,22 @@ export async function GET(req: Request) {
   };
   const range = req.headers.get("range");
   if (range) upstreamHeaders["range"] = range;
-  const referer = req.headers.get("referer");
-  if (referer) upstreamHeaders["referer"] = referer;
+
+  // Prefer the source page URL (passed as ?ref=) over the browser referer.
+  const sourceRef = searchParams.get("ref");
+  if (sourceRef) {
+    try {
+      const refUrl = new URL(sourceRef);
+      if (refUrl.protocol === "http:" || refUrl.protocol === "https:") {
+        upstreamHeaders["referer"] = sourceRef;
+      }
+    } catch {
+      /* ignore invalid ref */
+    }
+  } else {
+    const referer = req.headers.get("referer");
+    if (referer) upstreamHeaders["referer"] = referer;
+  }
 
   let upstream: Response;
   try {

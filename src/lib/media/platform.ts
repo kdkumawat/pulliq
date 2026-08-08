@@ -80,3 +80,24 @@ export function isValidHttpUrl(raw: string): boolean {
     return false;
   }
 }
+
+/** Strip playlist/radio params from YouTube URLs so yt-dlp targets a single video. */
+export function normalizeExtractionUrl(url: string): string {
+  try {
+    const u = new URL(normalizeUrl(url));
+    const host = u.hostname.toLowerCase();
+    if (host === "youtu.be" && u.pathname.length > 1) {
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(u.pathname.slice(1))}`;
+    }
+    if (host.includes("youtube.com") && u.pathname === "/watch") {
+      const id = u.searchParams.get("v");
+      if (id) return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`;
+    }
+  } catch {
+    /* ignore */
+  }
+  return url;
+}
+
+/** Platforms where page HTML has a more reliable direct media URL than yt-dlp. */
+export const PAGE_FIRST_DOWNLOAD_PLATFORMS = new Set<PlatformId>(["linkedin"]);
