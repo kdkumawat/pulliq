@@ -9,6 +9,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+# Pass GA (and other NEXT_PUBLIC) into the build when Render provides them
+ARG NEXT_PUBLIC_GA_MEASUREMENT_ID
+ARG GA_MEASUREMENT_ID
+ENV NEXT_PUBLIC_GA_MEASUREMENT_ID=${NEXT_PUBLIC_GA_MEASUREMENT_ID}
+ENV GA_MEASUREMENT_ID=${GA_MEASUREMENT_ID}
 RUN bun run build
 
 FROM node:20-slim AS runner

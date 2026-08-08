@@ -12,17 +12,13 @@ declare global {
   }
 }
 
-export const GA_MEASUREMENT_ID =
-  process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID ?? "";
-
 export function isAnalyticsEnabled(): boolean {
-  return !!GA_MEASUREMENT_ID;
+  if (typeof window === "undefined") return false;
+  return typeof window.gtag === "function";
 }
 
 function gtagEvent(name: string, params?: EventParams) {
-  if (typeof window === "undefined" || !window.gtag || !GA_MEASUREMENT_ID) {
-    return;
-  }
+  if (!isAnalyticsEnabled()) return;
   const clean: Record<string, string | number | boolean> = {};
   if (params) {
     for (const [k, v] of Object.entries(params)) {

@@ -44,8 +44,20 @@ The app pings its own public URL every **10 minutes** while the Node process is 
 Check stats: `curl https://pulliq.onrender.com/api/health`
 
 ```json
-{"ok":true,"service":"pulliq","uptimeSec":3600,"stats":{"analyzes":12,"downloads":3,"keepAlivePings":6}}
+{
+  "ok": true,
+  "service": "pulliq",
+  "uptimeSec": 3600,
+  "analytics": {
+    "enabled": true,
+    "source": "GA_MEASUREMENT_ID",
+    "measurementIdHint": "…43BG"
+  },
+  "stats": { "analyzes": 12, "downloads": 3, "keepAlivePings": 6 }
+}
 ```
+
+If `analytics.enabled` is `false`, set `GA_MEASUREMENT_ID` on Render and redeploy.
 
 #### External backup (optional)
 
@@ -61,9 +73,10 @@ UptimeRobot or cron-job.org pinging `/api/health` every 5 min can wake the app a
 2. **Admin** (gear) → **Create property** → name it `Pulliq`, set timezone/currency.
 3. Choose **Web** stream → URL: `https://pulliq.onrender.com` (or your domain).
 4. Copy the **Measurement ID** (format `G-XXXXXXXXXX`).
-5. In **Render Dashboard** → your service → **Environment** → add:
-   - `NEXT_PUBLIC_GA_MEASUREMENT_ID` = `G-XXXXXXXXXX`
-6. Redeploy (or wait for auto-deploy after pushing env to repo).
+5. In **Render Dashboard** → your service → **Environment** → add (either works; prefer both):
+   - `GA_MEASUREMENT_ID` = `G-XXXXXXXXXX` (read at **runtime** - required for Docker)
+   - `NEXT_PUBLIC_GA_MEASUREMENT_ID` = `G-XXXXXXXXXX` (optional, used at build time)
+6. **Manual Deploy** → **Clear build cache & deploy** (needed after first GA setup).
 
 #### What you can see in GA4
 
