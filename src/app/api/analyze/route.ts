@@ -8,6 +8,7 @@ import {
 import { extractMedia, type RawExtract, type RawFormat } from "@/lib/media/extract";
 import { buildMetadataFromExtract } from "@/lib/media/metadata";
 import { assertSafeUrl } from "@/lib/media/ssrf";
+import { incrementAnalyzes } from "@/lib/server-stats";
 import type { AnalyzeResponse, MediaFormat, MediaKind } from "@/lib/media/types";
 
 export const runtime = "nodejs";
@@ -260,6 +261,8 @@ export async function POST(req: Request) {
       demo: false,
       tookMs: Date.now() - startedAt,
     };
+
+    incrementAnalyzes();
 
     return NextResponse.json(response, {
       headers: { "Cache-Control": "no-store" },

@@ -7,6 +7,7 @@ import { LandingView } from "@/components/pulliq/landing-view";
 import { AnalyzeView } from "@/components/pulliq/analyze-view";
 import { InfoDialog, type DocKind } from "@/components/pulliq/info-dialog";
 import { ReactQueryProvider } from "@/components/pulliq/react-query-provider";
+import { AnalyticsTracker } from "@/components/pulliq/analytics-tracker";
 import { usePulliqStore } from "@/store/pulliq-store";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
@@ -14,6 +15,7 @@ import { toast } from "sonner";
 export default function Home() {
   return (
     <ReactQueryProvider>
+      <AnalyticsTracker />
       <App />
     </ReactQueryProvider>
   );

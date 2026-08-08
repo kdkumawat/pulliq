@@ -9,6 +9,10 @@ import { useAnalyze } from "@/hooks/use-analyze";
 import { isValidHttpUrl } from "@/lib/media/platform";
 import { AnalyzeSkeleton } from "./analyze-skeleton";
 import { AnalyzeResult } from "./analyze-result";
+import {
+  trackAnalyzeError,
+  trackAnalyzeSuccess,
+} from "@/lib/analytics";
 
 export function AnalyzeView() {
   const { url, analyzing, result, error, setAnalyzing, setResult, setError, reset, startAnalyze } =
@@ -24,12 +28,18 @@ export function AnalyzeView() {
     }
     if (query.isError) {
       setAnalyzing(false);
-      setError(query.error instanceof Error ? query.error.message : "Something went wrong");
+      const msg =
+        query.error instanceof Error ? query.error.message : "Something went wrong";
+      setError(msg);
+      trackAnalyzeError(msg);
       return;
     }
-    if (query.isSuccess) {
+    if (query.isSuccess && query.data) {
       setAnalyzing(false);
       setResult(query.data);
+      if (query.data.ok) {
+        trackAnalyzeSuccess(query.data.platform, query.data.kind);
+      }
     }
   }, [query.status, query.isLoading, query.isError, query.isSuccess, query.data, query.error, setAnalyzing, setError, setResult]);
 

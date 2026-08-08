@@ -3,6 +3,7 @@ import { Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/pulliq/theme-provider";
 import { StructuredData } from "@/components/pulliq/structured-data";
+import { GoogleAnalytics } from "@/components/pulliq/google-analytics";
 
 const jakartaSans = Plus_Jakarta_Sans({
   variable: "--font-inter",
@@ -118,6 +119,7 @@ export default function RootLayout({
         >
           {children}
         </ThemeProvider>
+        <GoogleAnalytics />
       </body>
     </html>
   );

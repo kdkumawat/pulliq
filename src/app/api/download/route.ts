@@ -10,6 +10,7 @@ import {
   stripVideoMetadata,
 } from "@/lib/media/clean";
 import { FFMPEG, TMP_BASE, YT_DLP } from "@/lib/media/paths";
+import { incrementDownloads } from "@/lib/server-stats";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -490,6 +491,8 @@ export async function POST(req: Request) {
     setTimeout(() => {
       fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }, 5 * 60 * 1000).unref?.();
+
+    incrementDownloads();
 
     return new Response(readable, {
       status: 200,

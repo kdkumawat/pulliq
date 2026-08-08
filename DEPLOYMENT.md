@@ -31,31 +31,59 @@ You could deploy **only the static frontend** to Vercel and run the API elsewher
 
 ### Keep-alive (Render free tier)
 
-Render spins down after **15 minutes** without traffic. You need a ping **at least every 14 minutes**.
+Render spins down after **15 minutes** without **inbound** traffic.
 
-**Do not rely on GitHub Actions cron alone.** Scheduled workflows are *best-effort* - GitHub often delays them 45-90+ minutes (your runs at 4:26, 5:13, 6:01, 7:26 are normal). See [GitHub docs](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule).
+#### Built-in self-ping (enabled on Render automatically)
 
-#### Recommended: UptimeRobot (free, reliable)
+The app pings its own public URL every **10 minutes** while the Node process is running (`src/lib/keep-alive.ts` + `src/instrumentation.ts`). Render sets `RENDER_EXTERNAL_URL`; no GitHub cron required.
 
-1. Sign up at [uptimerobot.com](https://uptimerobot.com)
-2. **Add monitor** → type **HTTP(s)**
-3. URL: `https://pulliq.onrender.com/api/analyze`
-4. Interval: **5 minutes**
-5. Save
+- Endpoint: `GET /api/health` (lightweight, includes server stats)
+- Disable: set env `KEEP_ALIVE=false`
+- **Limitation:** Cannot wake a spun-down instance. Something must hit the site first (you, a user, or deploy); then self-ping keeps it warm.
 
-UptimeRobot pings on schedule and keeps Render awake.
+Check stats: `curl https://pulliq.onrender.com/api/health`
 
-#### Alternative: cron-job.org
+```json
+{"ok":true,"service":"pulliq","uptimeSec":3600,"stats":{"analyzes":12,"downloads":3,"keepAlivePings":6}}
+```
 
-1. [cron-job.org](https://cron-job.org) → create account
-2. Create cron job → URL `https://pulliq.onrender.com/api/analyze`
-3. Schedule: every **10 minutes** (or 5 if available)
+#### External backup (optional)
 
-#### Backup: GitHub Actions workflow
-
-`.github/workflows/keep-alive.yml` pings when GitHub actually runs it (unreliable). Use **Run workflow** manually or keep it as a bonus - not your primary keep-alive.
+UptimeRobot or cron-job.org pinging `/api/health` every 5 min can wake the app after spin-down. GitHub Actions cron is unreliable (often 45-90+ min gaps).
 
 **Trade-off:** A warm instance uses your **750 free instance hours/month** (~720 h if always on).
+
+### Analytics (Google Analytics 4)
+
+#### Setup steps
+
+1. Go to [analytics.google.com](https://analytics.google.com) and create an account (if needed).
+2. **Admin** (gear) → **Create property** → name it `Pulliq`, set timezone/currency.
+3. Choose **Web** stream → URL: `https://pulliq.onrender.com` (or your domain).
+4. Copy the **Measurement ID** (format `G-XXXXXXXXXX`).
+5. In **Render Dashboard** → your service → **Environment** → add:
+   - `NEXT_PUBLIC_GA_MEASUREMENT_ID` = `G-XXXXXXXXXX`
+6. Redeploy (or wait for auto-deploy after pushing env to repo).
+
+#### What you can see in GA4
+
+| Metric | GA event | Where in GA4 |
+|--------|----------|----------------|
+| Page / screen views | `screen_view` (landing vs analyze) | Reports → Engagement → Pages and screens |
+| Analyze started | `analyze_start` | Reports → Engagement → Events |
+| Analyze succeeded | `analyze_success` (platform, media kind) | Events → click event → add `platform` dimension |
+| Analyze failed | `analyze_error` | Events |
+| Download started | `download_start` (format, clean copy) | Events |
+| Download succeeded | `download_success` | Events |
+| Download failed | `download_error` | Events |
+
+**Mark key events:** Admin → Data display → Events → toggle **download_success** and **analyze_success** as conversions.
+
+**Real-time test:** Reports → Realtime while you use the site after adding the Measurement ID.
+
+#### Server-side counters (bonus)
+
+`GET /api/health` returns in-memory `analyzes` and `downloads` counts (reset on redeploy). Useful for quick checks; GA4 is the source of truth for traffic.
 
 ## Prerequisites
 

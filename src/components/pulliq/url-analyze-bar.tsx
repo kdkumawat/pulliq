@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { isValidHttpUrl, detectPlatform, getPlatformInfo } from "@/lib/media/platform";
 import { usePulliqStore } from "@/store/pulliq-store";
 import { PlatformIcon } from "./platform-icon";
+import { trackAnalyzeStart } from "@/lib/analytics";
 
 export function UrlAnalyzeBar({
   size = "lg",
@@ -56,6 +57,7 @@ export function UrlAnalyzeBar({
       inputRef.current?.focus();
       return;
     }
+    trackAnalyzeStart(platform !== "unknown" ? platform : undefined);
     startAnalyze(trimmed);
     onAnalyzed?.();
   };

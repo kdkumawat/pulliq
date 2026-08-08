@@ -3,6 +3,11 @@
 import * as React from "react";
 import { usePulliqStore } from "@/store/pulliq-store";
 import type { AnalyzeResponse } from "@/lib/media/types";
+import {
+  trackDownloadError,
+  trackDownloadStart,
+  trackDownloadSuccess,
+} from "@/lib/analytics";
 
 export type DownloadStatus = "idle" | "preparing" | "downloading" | "done" | "error";
 
@@ -38,6 +43,8 @@ export function useDownload() {
 
       setState({ ...INITIAL, status: "preparing" });
 
+      trackDownloadStart(opts.format, !!opts.clean, result?.platform);
+
       try {
         const res = await fetch("/api/download", {
           method: "POST",
@@ -55,6 +62,7 @@ export function useDownload() {
             /* ignore */
           }
           setState({ ...INITIAL, status: "error", error: msg });
+          trackDownloadError(opts.format, msg);
           return;
         }
 
@@ -80,6 +88,7 @@ export function useDownload() {
             progress: 1,
             filename,
           });
+          trackDownloadSuccess(opts.format, !!opts.clean, result?.platform);
           return;
         }
 
@@ -116,6 +125,7 @@ export function useDownload() {
           received,
           total: total || received,
         }));
+        trackDownloadSuccess(opts.format, !!opts.clean, result?.platform);
       } catch (err) {
         if ((err as Error).name === "AbortError") {
           setState({ ...INITIAL, status: "idle" });
@@ -126,6 +136,10 @@ export function useDownload() {
           status: "error",
           error: err instanceof Error ? err.message : "Download failed",
         });
+        trackDownloadError(
+          opts.format,
+          err instanceof Error ? err.message : "Download failed"
+        );
       }
     },
     [url, result]
