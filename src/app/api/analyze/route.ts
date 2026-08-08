@@ -6,7 +6,6 @@ import {
   UNSUPPORTED_PLATFORMS,
 } from "@/lib/media/platform";
 import { extractMedia, type RawExtract, type RawFormat } from "@/lib/media/extract";
-import { friendlyMediaError } from "@/lib/media/errors";
 import { buildMetadataFromExtract } from "@/lib/media/metadata";
 import { assertSafeUrl } from "@/lib/media/ssrf";
 import { incrementAnalyzes } from "@/lib/server-stats";
@@ -51,6 +50,7 @@ function extractHashtags(text?: string): string[] | undefined {
 
 function pickBestFormat(raw: RawExtract): RawFormat | undefined {
   if (!raw.formats.length) return undefined;
+  // Prefer progressive mp4 (has both vcodec + acodec, ext mp4) by height.
   const progressive = raw.formats
     .filter(
       (f) =>
@@ -68,17 +68,22 @@ function detectKind(raw: RawExtract, best?: RawFormat): MediaKind {
   if (raw.carousel && raw.carousel.length > 0) return "carousel";
   const hasVideoCodec =
     (best?.vcodec && best.vcodec !== "none" && best.vcodec !== undefined) ||
-    raw.formats.some((f) => f.vcodec && f.vcodec !== "none");
+    (Array.isArray((raw as any).formats) &&
+      (raw as any).formats.some((f: RawFormat) => f.vcodec && f.vcodec !== "none"));
   const hasAudioCodec =
     (best?.acodec && best.acodec !== "none") ||
-    raw.formats.some((f) => f.acodec && f.acodec !== "none");
+    (Array.isArray((raw as any).formats) &&
+      (raw as any).formats.some((f: RawFormat) => f.acodec && f.acodec !== "none"));
   const isImageUrl =
     (best?.ext && /(jpg|jpeg|png|webp|gif)/i.test(best.ext)) ||
     (best?.url ?? "").match(/\.(jpg|jpeg|png|webp|gif)(\?|$)/i) !== null;
 
+  // og-video-fallback extractor sets isVideo=true and the url is a direct mp4.
   if (raw.isVideo === true && !isImageUrl) return "video";
+  // og-image-fallback extractor sets isVideo=false.
   if (raw.isVideo === false && isImageUrl) return "image";
 
+  // Audio-only: has audio but no video stream.
   if (hasAudioCodec && !hasVideoCodec && !isImageUrl) return "audio";
   if (raw.isVideo === false && hasAudioCodec) return "audio";
 
@@ -141,10 +146,8 @@ function buildFormats(
 
   if (isImage) return out;
 
-  // Transcode renditions <= source height (offer all when height unknown).
-  const renditions = (
-    height > 0 ? [1080, 720, 480].filter((h) => h <= height) : [1080, 720, 480]
-  );
+  // Transcode renditions <= source height.
+  const renditions = [1080, 720, 480].filter((h) => h <= height);
   for (const h of renditions) {
     const w = height ? Math.round((width * h) / height) : undefined;
     out.push({
@@ -153,7 +156,7 @@ function buildFormats(
       quality: `${h}p`,
       ext: "mp4",
       kind: "video",
-      filesize: filesize && height > 0 ? Math.round(filesize * (h / height)) : undefined,
+      filesize: filesize ? Math.round(filesize * (h / height)) : undefined,
       width: w,
       height: h,
       note: "Transcoded MP4 (H.264)",
@@ -268,7 +271,7 @@ export async function POST(req: Request) {
     // Be honest: if we can't access the link, say so clearly - no fake content.
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[analyze] extraction failed for ${url}:`, msg);
-    const reason = friendlyMediaError(msg, platform);
+    const reason = friendlyFailureReason(msg, platform);
     return NextResponse.json(
       {
         ok: false,
@@ -291,3 +294,32 @@ export async function GET() {
   });
 }
 
+/** Turn a raw error into a clear, honest, user-facing message. */
+function friendlyFailureReason(msg: string, platform: string): string {
+  const lower = msg.toLowerCase();
+  const platName = capitalize(platform);
+  // LinkedIn and Facebook require authentication for most content.
+  if (platform === "linkedin" || platform === "facebook") {
+    return `${platName} requires login to view most content, so Pulliq can't access it. Try a public post or a different platform.`;
+  }
+  if (lower.includes("timed out")) {
+    return "This link took too long to respond. Please try again in a moment.";
+  }
+  if (lower.includes("private") || lower.includes("login") || lower.includes("sign in") || lower.includes("unauthorized")) {
+    return "This content isn't publicly accessible. Pulliq only works with public links.";
+  }
+  if (lower.includes("no video") || lower.includes("not found") || lower.includes("404")) {
+    return "No media could be found at this link. Check that the URL is correct and public.";
+  }
+  if (lower.includes("unexpected response") || lower.includes("blocked")) {
+    return `${platName} blocked automated access to this link, so Pulliq couldn't fetch it. Try a different link or platform.`;
+  }
+  if (lower.includes("unsupported url") || lower.includes("no suitable")) {
+    return "This platform or link isn't supported. Pulliq works with public links from YouTube, Instagram, TikTok, X, Reddit, Pinterest, Vimeo, SoundCloud, and more.";
+  }
+  return "Pulliq couldn't access this link. It may be private, region-locked, or the platform may block automated access. Please check the link and try again.";
+}
+
+function capitalize(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}

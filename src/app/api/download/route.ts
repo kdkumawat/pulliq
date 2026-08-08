@@ -3,14 +3,7 @@ import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { isValidHttpUrl, detectPlatform, normalizeExtractionUrl, PAGE_FIRST_DOWNLOAD_PLATFORMS } from "@/lib/media/platform";
-import { friendlyDownloadError } from "@/lib/media/errors";
-import {
-  downloadRemoteFile,
-  extFromMediaUrl,
-  isDirectDownloadUrl,
-  resolvePageMediaFromUrl,
-} from "@/lib/media/page-fallback";
+import { isValidHttpUrl } from "@/lib/media/platform";
 import { assertSafeUrl } from "@/lib/media/ssrf";
 import {
   stripImageMetadata,
@@ -135,6 +128,7 @@ function planForFormat(format: string): DownloadPlan | null {
       };
     case "mp4-1080":
       return {
+        // Try merged bestvideo+bestaudio up to 1080p, fall back to best.
         formatSpec: "bv*[height<=1080]+ba/b[height<=1080]/best",
         outExt: "mp4",
         mime: "video/mp4",
@@ -184,6 +178,9 @@ async function downloadSource(
   formatSpec: string
 ): Promise<{ filePath: string; title: string }> {
   const outTemplate = path.join(workDir, "source.%(ext)s");
+  // --print captures the title in the same pass. --print implies --simulate,
+  // so we add --no-simulate to force the actual download. --merge-output-format
+  // ensures merged video+audio lands in a single mp4 container.
   const args = [
     "--no-warnings",
     "--no-playlist",
@@ -221,106 +218,58 @@ async function downloadSource(
 }
 
 /**
- * Fallback when yt-dlp fails: resolve direct video/image URL from page HTML.
+ * Fallback: download an image directly by extracting og:image from the page HTML.
+ * Used when yt-dlp fails (e.g. Twitter/X image posts).
+ * Returns { filePath, title, ext } or null if no image found.
  */
-async function downloadFromPageFallback(
-  pageUrl: string,
+async function downloadDirectImage(
+  url: string,
   workDir: string
 ): Promise<{ filePath: string; title: string; ext: string } | null> {
   try {
-    const media = await resolvePageMediaFromUrl(pageUrl);
-    if (!media) return null;
+    // Fetch the page HTML.
+    const pageRes = await fetch(url, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!pageRes.ok) return null;
+    const html = await pageRes.text();
 
-    if (media.kind === "video") {
-      const ext = extFromMediaUrl(media.url);
-      const filePath = path.join(workDir, `source.${ext}`);
-      await downloadRemoteFile(media.url, filePath, pageUrl);
-      return { filePath, title: media.title, ext };
-    }
+    // Extract og:image URL.
+    const imgMatch = /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)(?::url)?["']\s+content=["']([^"']+)["']/i.exec(html);
+    if (!imgMatch || !imgMatch[1]) return null;
+    const imgUrl = imgMatch[1].trim();
+    if (!imgUrl.startsWith("http")) return null;
 
-    const filePath = path.join(workDir, `source.${media.ext}`);
-    await downloadRemoteFile(media.url, filePath, pageUrl);
-    return { filePath, title: media.title, ext: media.ext };
+    // Extract title.
+    const titleMatch = /<meta\s+property=["']og:title["']\s+content=["']([^"']*)["']/i.exec(html);
+    const siteMatch = /<meta\s+property=["']og:site_name["']\s+content=["']([^"']*)["']/i.exec(html);
+    const title = titleMatch?.[1] || siteMatch?.[1] || "image";
+
+    // Determine extension from URL.
+    const ext = imgUrl.match(/\.(jpg|jpeg|png|webp|gif)/i)?.[1]?.toLowerCase() || "jpg";
+
+    // Download the image.
+    const imgRes = await fetch(imgUrl, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!imgRes.ok) return null;
+    const buf = Buffer.from(await imgRes.arrayBuffer());
+    const filePath = path.join(workDir, `source.${ext}`);
+    await fs.writeFile(filePath, buf);
+
+    return { filePath, title, ext };
   } catch {
     return null;
-  }
-}
-
-async function downloadDirectMedia(
-  mediaUrl: string,
-  pageUrl: string,
-  workDir: string,
-  title = "pulliq-media"
-): Promise<{ filePath: string; title: string; ext: string }> {
-  const ext = extFromMediaUrl(mediaUrl);
-  const filePath = path.join(workDir, `source.${ext}`);
-  await downloadRemoteFile(mediaUrl, filePath, pageUrl);
-  return { filePath, title, ext };
-}
-
-/**
- * Acquire source media: direct URL, page fallback, or yt-dlp depending on platform.
- */
-async function acquireSource(opts: {
-  pageUrl: string;
-  platform: ReturnType<typeof detectPlatform>;
-  formatSpec: string;
-  workDir: string;
-  format: string;
-  mediaUrl?: string;
-}): Promise<{ filePath: string; title: string; ext: string }> {
-  const { pageUrl, platform, formatSpec, workDir, format, mediaUrl } = opts;
-  const isYoutube = platform === "youtube" || platform === "youtube-music";
-
-  // Original: use the direct URL from analyze when yt-dlp is unreliable.
-  if (
-    format === "original" &&
-    mediaUrl &&
-    isDirectDownloadUrl(mediaUrl, platform)
-  ) {
-    try {
-      await assertSafeUrl(mediaUrl);
-      const pageMedia = await resolvePageMediaFromUrl(pageUrl);
-      const title = pageMedia?.title || "pulliq-media";
-      return await downloadDirectMedia(mediaUrl, pageUrl, workDir, title);
-    } catch {
-      /* fall through */
-    }
-  }
-
-  // LinkedIn and similar: page HTML has the real mp4; yt-dlp often grabs a thumbnail.
-  if (PAGE_FIRST_DOWNLOAD_PLATFORMS.has(platform)) {
-    const pageResult = await downloadFromPageFallback(pageUrl, workDir);
-    if (pageResult) return pageResult;
-    const result = await downloadSource(pageUrl, workDir, formatSpec);
-    return {
-      filePath: result.filePath,
-      title: result.title,
-      ext: path.extname(result.filePath).slice(1).toLowerCase(),
-    };
-  }
-
-  // YouTube: yt-dlp only - googlevideo page URLs are IP-bound and return 403.
-  if (isYoutube) {
-    const result = await downloadSource(pageUrl, workDir, formatSpec);
-    return {
-      filePath: result.filePath,
-      title: result.title,
-      ext: path.extname(result.filePath).slice(1).toLowerCase(),
-    };
-  }
-
-  try {
-    const result = await downloadSource(pageUrl, workDir, formatSpec);
-    return {
-      filePath: result.filePath,
-      title: result.title,
-      ext: path.extname(result.filePath).slice(1).toLowerCase(),
-    };
-  } catch (dlErr) {
-    const pageResult = await downloadFromPageFallback(pageUrl, workDir);
-    if (pageResult) return pageResult;
-    throw dlErr;
   }
 }
 
@@ -406,7 +355,7 @@ function guessMimeFromExt(ext: string): string {
 /* ---------- route handlers ---------- */
 
 export async function POST(req: Request) {
-  let body: { url?: unknown; format?: unknown; clean?: unknown; mediaUrl?: unknown };
+  let body: { url?: unknown; format?: unknown; clean?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -415,8 +364,6 @@ export async function POST(req: Request) {
   const url = typeof body?.url === "string" ? body.url.trim() : "";
   const format = typeof body?.format === "string" ? body.format : "";
   const clean = body?.clean === true;
-  const mediaUrl =
-    typeof body?.mediaUrl === "string" ? body.mediaUrl.trim() : undefined;
 
   if (!url || !isValidHttpUrl(url)) {
     return NextResponse.json(
@@ -458,21 +405,31 @@ export async function POST(req: Request) {
   let finalMime = plan.mime;
   let downloadTitle = "pulliq-media";
 
-  const platform = detectPlatform(url);
-  const pageUrl = normalizeExtractionUrl(url);
-
   try {
-    const acquired = await acquireSource({
-      pageUrl,
-      platform,
-      formatSpec: plan.formatSpec,
-      workDir,
-      format,
-      mediaUrl,
-    });
-    const srcPath = acquired.filePath;
-    downloadTitle = acquired.title;
-    const srcExt = acquired.ext;
+    // Step 1: download source via yt-dlp.
+    let srcPath: string;
+    let srcExt: string;
+    try {
+      const result = await downloadSource(url, workDir, plan.formatSpec);
+      srcPath = result.filePath;
+      downloadTitle = result.title;
+      srcExt = path.extname(srcPath).slice(1).toLowerCase();
+    } catch (dlErr) {
+      // yt-dlp failed (e.g. Twitter image post). Try direct image fallback:
+      // fetch the page HTML, extract og:image, download the image directly.
+      if (format === "original" || format === "mp3-128") {
+        const imgResult = await downloadDirectImage(url, workDir);
+        if (imgResult) {
+          srcPath = imgResult.filePath;
+          downloadTitle = imgResult.title;
+          srcExt = imgResult.ext;
+        } else {
+          throw dlErr;
+        }
+      } else {
+        throw dlErr;
+      }
+    }
 
     // Step 2: process based on plan.
     if (plan.transcode === "scale" && plan.targetHeight) {
@@ -517,6 +474,7 @@ export async function POST(req: Request) {
     const readable = new ReadableStream<Uint8Array>({
       start(controller) {
         stream.on("data", (chunk: Buffer) => {
+          // Buffer is a Uint8Array subclass - pass a view to avoid copying.
           controller.enqueue(
             new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
           );
@@ -529,6 +487,7 @@ export async function POST(req: Request) {
       },
     });
 
+    // Schedule cleanup of this work dir after streaming should be done.
     setTimeout(() => {
       fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     }, 5 * 60 * 1000).unref?.();
@@ -545,16 +504,19 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
+    // Clean up work dir on error.
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
 
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[download] failed:", msg);
 
-    const platform = detectPlatform(url);
+    // If yt-dlp couldn't resolve/download (often the case for demo URLs or
+    // platforms that block the sandbox), return a clear 409.
     return NextResponse.json(
       {
         ok: false,
-        error: friendlyDownloadError(msg, platform),
+        error:
+          "This media could not be fetched for download. Live download is unavailable for this link in this environment.",
       },
       { status: 409, headers: { "Cache-Control": "no-store" } }
     );

@@ -49,14 +49,7 @@ export function useDownload() {
         const res = await fetch("/api/download", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url,
-            format: opts.format,
-            clean: !!opts.clean,
-            ...(opts.format === "original" && result?.mediaUrl
-              ? { mediaUrl: result.mediaUrl }
-              : {}),
-          }),
+          body: JSON.stringify({ url, format: opts.format, clean: !!opts.clean }),
           signal: controller.signal,
         });
 

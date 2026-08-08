@@ -14,7 +14,6 @@ import {
   Download,
 } from "lucide-react";
 import { usePulliqStore } from "@/store/pulliq-store";
-import { buildStreamUrl } from "@/lib/media/playable";
 import { PlatformIcon } from "./platform-icon";
 import {
   Carousel,
@@ -147,7 +146,6 @@ export function MediaPreview() {
 function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string }) {
   const { result } = usePulliqStore();
   const mediaUrl = result?.mediaUrl;
-  const pageUrl = result?.url;
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [state, setState] = React.useState<"loading" | "ready" | "error">(
     mediaUrl ? "loading" : "error"
@@ -155,8 +153,8 @@ function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string })
 
   const src = React.useMemo(() => {
     if (!mediaUrl) return null;
-    return buildStreamUrl(mediaUrl, pageUrl);
-  }, [mediaUrl, pageUrl]);
+    return `/api/stream?u=${encodeURIComponent(mediaUrl)}`;
+  }, [mediaUrl]);
 
   const retry = () => {
     if (!audioRef.current || !src) return;
@@ -226,7 +224,6 @@ function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string })
 function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string }) {
   const { result } = usePulliqStore();
   const mediaUrl = result?.mediaUrl;
-  const pageUrl = result?.url;
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const [state, setState] = React.useState<"loading" | "ready" | "error">(
     mediaUrl ? "loading" : "error"
@@ -234,8 +231,8 @@ function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string })
 
   const src = React.useMemo(() => {
     if (!mediaUrl) return null;
-    return buildStreamUrl(mediaUrl, pageUrl);
-  }, [mediaUrl, pageUrl]);
+    return `/api/stream?u=${encodeURIComponent(mediaUrl)}`;
+  }, [mediaUrl]);
 
   const retry = () => {
     if (!videoRef.current || !src) return;

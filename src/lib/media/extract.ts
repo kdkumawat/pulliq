@@ -1,17 +1,7 @@
 import { spawn } from "node:child_process";
 import type { CarouselItem } from "./types";
-import {
-  extractDirectVideoUrl,
-  fetchPageHtml,
-  isVideoThumbnailUrl,
-  parsePageDescription,
-  parsePageTitle,
-  parseSchemaVideoMeta,
-  parseDimensionsFromVideoUrl,
-} from "./page-fallback";
 
 import { YT_DLP } from "./paths";
-import { normalizeExtractionUrl } from "./platform";
 
 /**
  * yt-dlp wrapper for Pulliq.
@@ -279,11 +269,10 @@ function mapToRawExtract(info: any, slides: any[]): RawExtract {
  * The caller is expected to fall back to a demo response on failure.
  */
 export async function extractMedia(url: string): Promise<RawExtract> {
-  const targetUrl = normalizeExtractionUrl(url);
   let ytErr: Error | null = null;
   try {
     const out = await runYtDlp(
-      ["--no-warnings", "--no-playlist", "--skip-download", "--dump-json", targetUrl],
+      ["--no-warnings", "--no-playlist", "--skip-download", "--dump-json", url],
       EXTRACT_TIMEOUT_MS
     );
 
@@ -321,7 +310,7 @@ export async function extractMedia(url: string): Promise<RawExtract> {
   // Fallback: try extracting an image via og:image from the page HTML.
   // This handles Twitter/X image posts, Pinterest pins, and other pages
   // where yt-dlp can't find video but the page has a public image.
-  const imageFallback = await tryImageFallback(targetUrl);
+  const imageFallback = await tryImageFallback(url);
   if (imageFallback) {
     return imageFallback;
   }
@@ -337,18 +326,22 @@ export async function extractMedia(url: string): Promise<RawExtract> {
  */
 async function tryImageFallback(url: string): Promise<RawExtract | null> {
   try {
-    const html = await fetchPageHtml(url);
-    if (!html) return null;
+    const res = await fetch(url, {
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        accept: "text/html,application/xhtml+xml",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
 
-    const siteMatch =
-      /<meta\s+property=["']og:site_name["']\s+content=["']([^"']*)["']/i.exec(html);
-    const title = parsePageTitle(html);
-    const description = parsePageDescription(html);
-    const schema = parseSchemaVideoMeta(html);
-
+    // Extract og:image and twitter:image URLs, filtering out generic placeholders.
     const PLACEHOLDER_PATTERNS = [
-      /abs\.twimg\.com\/rweb\/ssr\/default/i,
-      /static\.licdn\.com\/sc\/ds\/common\/u\/images/i,
+      /abs\.twimg\.com\/rweb\/ssr\/default/i, // X/Twitter default og:image
+      /static\.licdn\.com\/sc\/ds\/common\/u\/images/i, // LinkedIn default
       /facebook\.com\/images\/fb-icon/i,
       /default-og-image/i,
     ];
@@ -356,8 +349,7 @@ async function tryImageFallback(url: string): Promise<RawExtract | null> {
       PLACEHOLDER_PATTERNS.some((p) => p.test(u));
 
     const images = new Set<string>();
-    const imgRegex =
-      /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)(?::url)?["']\s+content=["']([^"']+)["']/gi;
+    const imgRegex = /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)(?::url)?["']\s+content=["']([^"']+)["']/gi;
     let match;
     while ((match = imgRegex.exec(html)) !== null) {
       const imgUrl = match[1].trim();
@@ -365,53 +357,61 @@ async function tryImageFallback(url: string): Promise<RawExtract | null> {
         images.add(imgUrl);
       }
     }
-    const thumbnail = images.size > 0 ? Array.from(images)[0] : "";
 
-    // Video first (X schema.org, YouTube player JSON, Instagram video_url, og:video mp4).
-    const videoUrl = extractDirectVideoUrl(html);
-    if (videoUrl) {
-      const vext =
-        videoUrl.match(/\.(mp4|webm|mov|m4v)/i)?.[1]?.toLowerCase() || "mp4";
-      const urlDims = parseDimensionsFromVideoUrl(videoUrl);
-      return {
-        title,
-        creator: siteMatch?.[1] || "",
-        thumbnail,
-        duration: schema.duration,
-        width: schema.width || urlDims.width,
-        height: schema.height || urlDims.height,
-        formats: [
-          {
-            format_id: "0",
-            ext: vext,
-            url: videoUrl,
-            width: schema.width || urlDims.width,
-            height: schema.height || urlDims.height,
-            vcodec: "none",
-            acodec: "none",
-          },
-        ],
-        uploader: siteMatch?.[1] || undefined,
-        description,
-        url: videoUrl,
-        isVideo: true,
-        extractor: "og-video-fallback",
-      };
+    // Also check for og:video (embedded video players).
+    const ogVideoMatch = /<meta\s+property=["']og:video(?::url)?["']\s+content=["']([^"']+)["']/i.exec(html);
+    const ogVideoSecureMatch = /<meta\s+property=["']og:video:secure_url["']\s+content=["']([^"']+)["']/i.exec(html);
+    const videoUrl = ogVideoSecureMatch?.[1] || ogVideoMatch?.[1];
+
+    // Extract og:title and og:description for social metadata.
+    const titleMatch = /<meta\s+property=["']og:title["']\s+content=["']([^"']*)["']/i.exec(html);
+    const descMatch = /<meta\s+property=["']og:description["']\s+content=["']([^"']*)["']/i.exec(html);
+    const siteMatch = /<meta\s+property=["']og:site_name["']\s+content=["']([^"']*)["']/i.exec(html);
+
+    const title = titleMatch?.[1] || siteMatch?.[1] || "Media";
+
+    // If there's an og:video with a direct media URL, return as video.
+    // (Filter out player embed URLs like player.vimeo.com which can't be played directly.)
+    if (videoUrl && videoUrl.startsWith("http")) {
+      const isDirectVideo = /\.(mp4|webm|mov|m4v)(\?|$)/i.test(videoUrl);
+      if (isDirectVideo) {
+        const vext = videoUrl.match(/\.(mp4|webm|mov|m4v)/i)?.[1]?.toLowerCase() || "mp4";
+        return {
+          title,
+          creator: siteMatch?.[1] || "",
+          thumbnail: images.size > 0 ? Array.from(images)[0] : "",
+          duration: undefined,
+          formats: [
+            {
+              format_id: "0",
+              ext: vext,
+              url: videoUrl,
+              vcodec: "none",
+              acodec: "none",
+            },
+          ],
+          uploader: siteMatch?.[1] || undefined,
+          description: descMatch?.[1] || undefined,
+          url: videoUrl,
+          isVideo: true,
+          extractor: "og-video-fallback",
+        };
+      }
     }
 
     if (images.size === 0) return null;
 
     const imgUrl = Array.from(images)[0];
-    // X/YouTube video posts use thumbnail URLs in og:image - not real images.
-    if (isVideoThumbnailUrl(imgUrl)) return null;
-
-    const ext =
-      imgUrl.match(/\.(jpg|jpeg|png|webp|gif)/i)?.[1]?.toLowerCase() || "jpg";
+    const ext = imgUrl.match(/\.(jpg|jpeg|png|webp|gif)/i)?.[1]?.toLowerCase() || "jpg";
 
     return {
       title: title || "Image",
       creator: siteMatch?.[1] || "",
       thumbnail: imgUrl,
+      duration: undefined,
+      width: undefined,
+      height: undefined,
+      filesize: undefined,
       formats: [
         {
           format_id: "0",
@@ -431,7 +431,7 @@ async function tryImageFallback(url: string): Promise<RawExtract | null> {
             }))
           : undefined,
       uploader: siteMatch?.[1] || undefined,
-      description,
+      description: descMatch?.[1] || undefined,
       url: imgUrl,
       isVideo: false,
       extractor: "og-image-fallback",

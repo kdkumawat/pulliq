@@ -51,7 +51,7 @@ const REMOVABLE_ITEMS = [
 export function DownloadPanel() {
   const { result } = usePulliqStore();
   const [selected, setSelected] = React.useState<string>("original");
-  const [clean, setClean] = React.useState(true);
+  const [clean, setClean] = React.useState(true); // default: without metadata
   const { state, download, reset } = useDownload();
 
   React.useEffect(() => {
@@ -89,6 +89,7 @@ export function DownloadPanel() {
         </div>
       </div>
 
+      {/* Format selection */}
       {isImage ? (
         <div className="relative mt-4 rounded-2xl border border-dashed border-border bg-background/40 p-4 text-center text-sm text-muted-foreground">
           Image format: {result.formats?.[0]?.ext?.toUpperCase() ?? "JPG"}
@@ -108,10 +109,12 @@ export function DownloadPanel() {
         </div>
       )}
 
+      {/* Clean toggle */}
       <div className="relative mt-4">
         <CleanToggle clean={clean} onChange={setClean} disabled={busy} />
       </div>
 
+      {/* Status / action */}
       <div className="relative mt-auto pt-5">
         {state.status === "error" ? (
           <div className="space-y-3">
@@ -142,7 +145,7 @@ export function DownloadPanel() {
         ) : state.status === "done" ? (
           <div className="space-y-3">
             <div className="flex items-center gap-2 rounded-xl border border-success/30 bg-success/5 px-4 py-2.5 text-sm text-success">
-              <Check className="h-4 w-4 shrink-0" />
+              <Check className="h-4 w-4 shrink-0" />{" "}
               <span className="truncate">Saved {state.filename}</span>
             </div>
             <Button variant="outline" className="w-full" onClick={reset}>
@@ -150,7 +153,12 @@ export function DownloadPanel() {
             </Button>
           </div>
         ) : (
-          <Button onClick={handleDownload} className="w-full" size="lg" disabled={busy}>
+          <Button
+            onClick={handleDownload}
+            className="w-full"
+            size="lg"
+            disabled={busy}
+          >
             <Download className="mr-2 h-4 w-4" />
             Download{clean ? " clean copy" : ""}
           </Button>
@@ -212,10 +220,7 @@ function FormatRow({
           {isAudioFmt && isFromVideo && (
             <Badge
               className="rounded-full px-1.5 py-0 text-[10px] border-0"
-              style={{
-                backgroundColor: "color-mix(in srgb, var(--chart-4) 14%, transparent)",
-                color: "var(--chart-4)",
-              }}
+              style={{ backgroundColor: "color-mix(in srgb, var(--chart-4) 14%, transparent)", color: "var(--chart-4)" }}
             >
               Extract audio
             </Badge>
@@ -284,7 +289,9 @@ function CleanToggle({
                 </TooltipTrigger>
                 <TooltipContent side="bottom" className="max-w-[220px]">
                   <div className="space-y-1">
-                    <p className="text-xs font-semibold text-foreground">Removes:</p>
+                    <p className="text-xs font-semibold text-foreground">
+                      Removes:
+                    </p>
                     <ul className="space-y-0.5">
                       {REMOVABLE_ITEMS.map((item) => (
                         <li key={item} className="flex items-center gap-1.5 text-[11px]">
@@ -303,6 +310,7 @@ function CleanToggle({
           </div>
         </div>
 
+        {/* Toggle switch */}
         <button
           type="button"
           role="switch"

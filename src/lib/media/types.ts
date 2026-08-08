@@ -111,8 +111,6 @@ export interface DownloadRequest {
   url: string;
   format: string; // format id
   clean?: boolean;
-  /** Direct media URL from analyze - used for original downloads when yt-dlp is unreliable. */
-  mediaUrl?: string;
 }
 
 export interface PlatformInfo {
