@@ -19,6 +19,7 @@ export function AnalyzeView() {
     usePulliqStore();
   // Run the query when on the analyze view and we don't yet have a result.
   const query = useAnalyze(url, analyzing || !result);
+  const progress = query.progress;
 
   // Sync query state into the store.
   React.useEffect(() => {
@@ -85,7 +86,7 @@ export function AnalyzeView() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
           >
-            <AnalyzeSkeleton />
+            <AnalyzeSkeleton progress={progress} />
           </motion.div>
         ) : error && !query.data ? (
           <motion.div

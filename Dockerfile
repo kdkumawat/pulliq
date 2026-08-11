@@ -23,15 +23,23 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
+# Install ffmpeg + yt-dlp WITH the [default] extras (EJS JS runtime) which
+# YouTube extraction requires since 2026. The entrypoint re-updates yt-dlp on
+# every container start so player changes don't require an app redeploy.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip ca-certificates \
-  && pip3 install --break-system-packages yt-dlp \
+  && pip3 install --break-system-packages --no-cache-dir -U "yt-dlp[default]" \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/node_modules/exiftool-vendored.pl ./node_modules/exiftool-vendored.pl
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
+# Cap the Node heap so a runaway request can't OOM the whole container.
+ENV NODE_OPTIONS=--max-old-space-size=768
 
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["/app/entrypoint.sh"]

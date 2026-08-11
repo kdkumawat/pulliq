@@ -9,6 +9,7 @@ primary_region = "iad"
 [env]
   NODE_ENV = "production"
   PORT = "3000"
+  NODE_OPTIONS = "--max-old-space-size=1536"
 
 [http_service]
   internal_port = 3000
@@ -24,7 +25,10 @@ primary_region = "iad"
     path = "/api/health"
     timeout = "5s"
 
+# Media processing (yt-dlp + ffmpeg) is memory hungry; 1 GB OOMs under load.
+# Bump to 2 GB. Concurrency is capped in code (src/lib/media/concurrency.ts)
+# so even 1 GB stays usable in a pinch.
 [[vm]]
-  memory = "1gb"
+  memory = "2gb"
   cpu_kind = "shared"
   cpus = 1

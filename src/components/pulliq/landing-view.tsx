@@ -187,7 +187,7 @@ const FEATURES = [
     title: "Download",
     color: "var(--primary)",
     desc: "Paste any public social link. Pulliq detects the platform automatically and fetches the highest quality - no dropdowns, no clutter.",
-    points: ["Auto platform detection", "Video, images, music & MP3", "Carousel & batch as ZIP"],
+    points: ["Auto platform detection", "Video, images, music & MP3", "Carousels, reels & clips"],
   },
   {
     icon: ScanSearch,

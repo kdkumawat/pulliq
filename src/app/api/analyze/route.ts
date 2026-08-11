@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
 import {
-  detectPlatform,
+  detectPlatformWithRedirect,
   getPlatformInfo,
   isValidHttpUrl,
   UNSUPPORTED_PLATFORMS,
 } from "@/lib/media/platform";
-import { extractMedia, type RawExtract, type RawFormat } from "@/lib/media/extract";
+import {
+  extractMedia,
+  isHlsMediaUrl,
+  isImageMediaUrl,
+  pickBestMediaFormat,
+  type RawExtract,
+  type RawFormat,
+} from "@/lib/media/extract";
 import { buildMetadataFromExtract } from "@/lib/media/metadata";
 import { assertSafeUrl } from "@/lib/media/ssrf";
 import { incrementAnalyzes } from "@/lib/server-stats";
@@ -48,49 +55,70 @@ function extractHashtags(text?: string): string[] | undefined {
   return Array.from(new Set(matches)).slice(0, 12);
 }
 
-function pickBestFormat(raw: RawExtract): RawFormat | undefined {
-  if (!raw.formats.length) return undefined;
-  // Prefer progressive mp4 (has both vcodec + acodec, ext mp4) by height.
-  const progressive = raw.formats
-    .filter(
-      (f) =>
-        f.vcodec &&
-        f.acodec &&
-        f.vcodec !== "none" &&
-        f.acodec !== "none" &&
-        (f.ext === "mp4" || (f.url ?? "").includes(".mp4"))
-    )
-    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
-  return progressive[0] || raw.formats[0];
-}
-
 function detectKind(raw: RawExtract, best?: RawFormat): MediaKind {
   if (raw.carousel && raw.carousel.length > 0) return "carousel";
-  const hasVideoCodec =
-    (best?.vcodec && best.vcodec !== "none" && best.vcodec !== undefined) ||
-    (Array.isArray((raw as any).formats) &&
-      (raw as any).formats.some((f: RawFormat) => f.vcodec && f.vcodec !== "none"));
-  const hasAudioCodec =
-    (best?.acodec && best.acodec !== "none") ||
-    (Array.isArray((raw as any).formats) &&
-      (raw as any).formats.some((f: RawFormat) => f.acodec && f.acodec !== "none"));
-  const isImageUrl =
-    (best?.ext && /(jpg|jpeg|png|webp|gif)/i.test(best.ext)) ||
-    (best?.url ?? "").match(/\.(jpg|jpeg|png|webp|gif)(\?|$)/i) !== null;
 
-  // og-video-fallback extractor sets isVideo=true and the url is a direct mp4.
-  if (raw.isVideo === true && !isImageUrl) return "video";
-  // og-image-fallback extractor sets isVideo=false.
-  if (raw.isVideo === false && isImageUrl) return "image";
+  const mainUrl = best?.url || raw.url || "";
+  const anyVideoWithUrl = (raw.formats || []).some(
+    (f) => f.vcodec && f.vcodec !== "none" && !!f.url
+  );
+  const hasAudioCodec = (raw.formats || []).some(
+    (f) => f.acodec && f.acodec !== "none"
+  );
+  const isImage = isImageMediaUrl(mainUrl, best?.ext || raw.ext);
+
+  // Video wins whenever any format is an actual video with a direct URL.
+  // This prevents videos being misclassified as images when the "best"
+  // format picked by yt-dlp happens to be an audio-only or thumbnail format.
+  if (anyVideoWithUrl) return "video";
+  if (raw.isVideo === true && !isImage) return "video";
+  if (raw.isVideo === false && isImage) return "image";
 
   // Audio-only: has audio but no video stream.
-  if (hasAudioCodec && !hasVideoCodec && !isImageUrl) return "audio";
+  if (hasAudioCodec && !anyVideoWithUrl && !isImage) return "audio";
   if (raw.isVideo === false && hasAudioCodec) return "audio";
 
-  if (hasVideoCodec) return "video";
-  if (isImageUrl) return "image";
-  if (raw.duration && !isImageUrl) return "audio";
+  if (isImage) return "image";
+  if (raw.duration && !isImage) return "audio";
   return "unknown";
+}
+
+/**
+ * Build an ordered list of playable URLs for in-browser playback:
+ * progressive mp4 first (no remux needed), then HLS (remuxed by the stream
+ * route), then audio. The player falls back down this list automatically,
+ * so a blocked CDN source never dead-ends playback.
+ */
+function buildMediaUrls(raw: RawExtract): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (u?: string) => {
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    out.push(u);
+  };
+
+  const byHeight = (a: RawFormat, b: RawFormat) =>
+    (b.height ?? 0) - (a.height ?? 0);
+  const media = (raw.formats || []).filter((f) => !!f.url && !isImageMediaUrl(f.url, f.ext));
+  const videos = media.filter((f) => f.vcodec && f.vcodec !== "none");
+
+  // 1. Progressive mp4 (browser-native, streamed byte-for-byte).
+  videos
+    .filter((f) => !isHlsMediaUrl(f.url ?? "") && !/\.mpd/i.test(f.url ?? ""))
+    .sort(byHeight)
+    .forEach((f) => push(f.url));
+  // 2. HLS (remuxed to fragmented MP4 by the stream route).
+  videos
+    .filter((f) => isHlsMediaUrl(f.url ?? ""))
+    .sort(byHeight)
+    .forEach((f) => push(f.url));
+  // 3. Audio-only streams.
+  media
+    .filter((f) => !videos.includes(f) && f.acodec && f.acodec !== "none")
+    .forEach((f) => push(f.url));
+  push(raw.url);
+  return out;
 }
 
 function buildFormats(
@@ -203,7 +231,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const platform = detectPlatform(url);
+  const platform = await detectPlatformWithRedirect(url);
   const startedAt = Date.now();
 
   // Reject DRM-protected streaming platforms upfront with a clear message.
@@ -220,67 +248,138 @@ export async function POST(req: Request) {
     );
   }
 
+  // SSRF guard - throws on private/loopback URLs (plain JSON error, pre-stream).
   try {
-    // SSRF guard - throws on private/loopback URLs.
     await assertSafeUrl(url);
-
-    const raw = await extractMedia(url);
-    const best = pickBestFormat(raw);
-    const formats = buildFormats(raw, best);
-    const metadata = buildMetadataFromExtract(raw, platform, best);
-    const kind = detectKind(raw, best);
-
-    const info = getPlatformInfo(platform);
-    const response: AnalyzeResponse = {
-      ok: true,
-      platform,
-      platformLabel: info?.name || "Unknown",
-      kind,
-      title: raw.title,
-      creator: raw.creator,
-      thumbnail: raw.thumbnail,
-      duration: raw.duration,
-      width: best?.width || raw.width,
-      height: best?.height || raw.height,
-      filesize: best?.filesize || raw.filesize,
-      url,
-      mediaUrl: best?.url || raw.url || undefined,
-      formats,
-      carousel: raw.carousel,
-      metadata,
-      social: {
-        caption: raw.description,
-        uploadDate: raw.uploadDate,
-        username: raw.uploader || raw.creator,
-        likes: raw.likeCount,
-        comments: raw.commentCount,
-        hashtags: extractHashtags(raw.description),
-        thumbnail: raw.thumbnail,
-        platform,
-      },
-      demo: false,
-      tookMs: Date.now() - startedAt,
-    };
-
-    incrementAnalyzes();
-
-    return NextResponse.json(response, {
-      headers: { "Cache-Control": "no-store" },
-    });
-  } catch (err) {
-    // Be honest: if we can't access the link, say so clearly - no fake content.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[analyze] extraction failed for ${url}:`, msg);
-    const reason = friendlyFailureReason(msg, platform);
+  } catch {
     return NextResponse.json(
-      {
-        ok: false,
-        platform,
-        error: reason,
-      },
-      { status: 422, headers: { "Cache-Control": "no-store" } }
+      { ok: false, error: "URL is not allowed." },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
     );
   }
+
+  // Stream NDJSON progress events, then the final result or error.
+  return new Response(analyzeStream(url, platform, startedAt), {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+/** Stream the analyze pipeline as NDJSON: progress events + result/error. */
+function analyzeStream(
+  url: string,
+  platform: PlatformId,
+  startedAt: number
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (ev: Record<string, unknown>) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(ev) + "\n"));
+        } catch {
+          /* client disconnected */
+        }
+      };
+
+      try {
+        emit({ type: "progress", pct: 5, stage: "Checking link" });
+
+        const raw = await extractMedia(url, (stage, pct) =>
+          emit({ type: "progress", pct, stage })
+        );
+
+        emit({ type: "progress", pct: 86, stage: "Building preview" });
+        const best = pickBestMediaFormat(raw);
+        const playableUrls = buildMediaUrls(raw);
+        const formats = buildFormats(raw, best);
+        const metadata = buildMetadataFromExtract(raw, platform, best);
+        const kind = detectKind(raw, best);
+
+        const info = getPlatformInfo(platform);
+
+        // When yt-dlp fails on a video-first platform and all we recovered is
+        // the page's og:image, be honest about it: it is a preview thumbnail,
+        // not the actual video (e.g. Vimeo requires login since 2026).
+        const VIDEO_FIRST = new Set<PlatformId>([
+          "youtube",
+          "youtube-music",
+          "vimeo",
+          "dailymotion",
+          "twitch",
+          "rumble",
+          "facebook",
+          "tiktok",
+          "threads",
+        ]);
+        const degradedToImage =
+          kind === "image" &&
+          raw.extractor === "og-image-fallback" &&
+          VIDEO_FIRST.has(platform);
+
+        const response: AnalyzeResponse = {
+          ok: true,
+          platform,
+          platformLabel: info?.name || "Unknown",
+          kind,
+          title: raw.title,
+          creator: raw.creator,
+          thumbnail: raw.thumbnail,
+          duration: raw.duration,
+          width: best?.width || raw.width,
+          height: best?.height || raw.height,
+          filesize: best?.filesize || raw.filesize,
+          url,
+          mediaUrl: playableUrls[0],
+          mediaUrls: playableUrls.length > 1 ? playableUrls : undefined,
+          formats,
+          carousel: raw.carousel,
+          metadata,
+          social: {
+            caption: raw.description,
+            uploadDate: raw.uploadDate,
+            username: raw.uploader || raw.creator,
+            likes: raw.likeCount,
+            comments: raw.commentCount,
+            hashtags: extractHashtags(raw.description),
+            thumbnail: raw.thumbnail,
+            platform,
+          },
+          demo: false,
+          note: degradedToImage
+            ? "Only a preview thumbnail was found on this page. The full video may require login, be region-locked, or be blocked for automated access."
+            : undefined,
+          tookMs: Date.now() - startedAt,
+        };
+
+        incrementAnalyzes();
+        emit({ type: "progress", pct: 100, stage: "Done" });
+        emit({ type: "result", data: response });
+      } catch (err) {
+        // Be honest: if we can't access the link, say so clearly - no fake content.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[analyze] extraction failed for ${url}:`, msg);
+
+        if (msg.includes("Server is busy")) {
+          emit({ type: "error", error: msg, status: 503 });
+        } else {
+          emit({
+            type: "error",
+            error: friendlyFailureReason(msg, platform),
+            status: 422,
+          });
+        }
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  });
 }
 
 export async function GET() {
@@ -309,7 +408,24 @@ function friendlyFailureReason(msg: string, platform: string): string {
     return "This content isn't publicly accessible. Pulliq only works with public links.";
   }
   if (lower.includes("no video") || lower.includes("not found") || lower.includes("404")) {
+    // Platforms that aggressively block automated access often fail with
+    // 403/404 patterns even for valid public links - say so honestly.
+    const BLOCKY = new Set([
+      "tiktok",
+      "instagram",
+      "facebook",
+      "threads",
+      "soundcloud",
+      "linkedin",
+      "vimeo",
+    ]);
+    if (BLOCKY.has(platform as any)) {
+      return `${platName} blocked automated access or couldn't be reached from this server (some platforms block cloud/datacenter IPs). The link may also be private or removed.`;
+    }
     return "No media could be found at this link. Check that the URL is correct and public.";
+  }
+  if (lower.includes("busy")) {
+    return "The server is busy right now. Please wait a moment and try again.";
   }
   if (lower.includes("unexpected response") || lower.includes("blocked")) {
     return `${platName} blocked automated access to this link, so Pulliq couldn't fetch it. Try a different link or platform.`;

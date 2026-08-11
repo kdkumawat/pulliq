@@ -80,9 +80,12 @@ export function MediaPreview() {
     );
   }
 
-  const isVideo = kind === "video";
-  const isImage = kind === "image";
+  // Unknown kind with a playable mediaUrl is still a video - try playback
+  // instead of rendering a static thumbnail (a common cause of "video shown
+  // as image" reports).
+  const isVideo = kind === "video" || (kind === "unknown" && !!result.mediaUrl);
   const isAudio = kind === "audio";
+  const isImage = kind === "image";
 
   return (
     <motion.div
@@ -96,7 +99,7 @@ export function MediaPreview() {
           <VideoPlayer thumbnail={thumbnail} title={title} />
         ) : isAudio ? (
           <AudioPlayer thumbnail={thumbnail} title={title} />
-        ) : (
+        ) : thumbnail ? (
           // Show the full original image - no cropping (object-contain).
           <img
             src={thumbnail}
@@ -104,6 +107,13 @@ export function MediaPreview() {
             className="h-full w-full object-contain"
             loading="eager"
           />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
+              <ImageIcon className="h-10 w-10" />
+              <span className="text-xs">No preview available</span>
+            </div>
+          </div>
         )}
 
         {/* Top-left platform chip */}
@@ -143,24 +153,53 @@ export function MediaPreview() {
 
 /* --------------------------- Audio player --------------------------- */
 
-function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string }) {
+/**
+ * Ordered playback URLs (progressive first, then HLS/alternates) mapped to
+ * the stream proxy. The browser tries each <source> in order and falls back
+ * automatically when one fails, so a blocked CDN never dead-ends playback.
+ */
+function usePlaybackSources(): string[] {
   const { result } = usePulliqStore();
-  const mediaUrl = result?.mediaUrl;
+  return React.useMemo(() => {
+    const urls = [result?.mediaUrl, ...(result?.mediaUrls ?? [])].filter(
+      (u): u is string => !!u
+    );
+    return [...new Set(urls)].map((u) => `/api/stream?u=${encodeURIComponent(u)}`);
+  }, [result?.mediaUrl, result?.mediaUrls]);
+}
+
+function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string }) {
+  const sources = usePlaybackSources();
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
   const [state, setState] = React.useState<"loading" | "ready" | "error">(
-    mediaUrl ? "loading" : "error"
+    sources.length ? "loading" : "error"
   );
-
-  const src = React.useMemo(() => {
-    if (!mediaUrl) return null;
-    return `/api/stream?u=${encodeURIComponent(mediaUrl)}`;
-  }, [mediaUrl]);
+  const [attempt, setAttempt] = React.useState(0);
 
   const retry = () => {
-    if (!audioRef.current || !src) return;
+    if (!sources.length) return;
     setState("loading");
-    audioRef.current.load();
+    // Remount via key re-runs the resource selection with the same sources.
+    setAttempt((a) => a + 1);
   };
+
+  if (!sources.length) {
+    return (
+      <div className="relative flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        {thumbnail && (
+          <img
+            src={thumbnail}
+            alt={title}
+            className="absolute inset-0 h-full w-full object-cover opacity-20"
+          />
+        )}
+        <Music className="relative h-8 w-8 text-muted-foreground/60" />
+        <p className="relative text-xs text-muted-foreground">
+          Preview unavailable. Download below.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex h-full w-full flex-col items-center justify-center gap-4 p-6">
@@ -185,34 +224,30 @@ function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string })
             <Music className="h-8 w-8 text-white" />
           </div>
         </div>
-        {src ? (
-          <>
-            <audio
-              ref={audioRef}
-              controls
-              preload="metadata"
-              className="relative w-full max-w-xs"
-              onCanPlay={() => setState("ready")}
-              onLoadedData={() => setState("ready")}
-              onError={() => setState("error")}
-            >
-              <source src={src} />
-            </audio>
-            {state === "error" && (
-              <div className="relative flex flex-col items-center gap-2 text-center">
-                <p className="text-xs text-muted-foreground">
-                  Preview unavailable. Download below.
-                </p>
-                <Button size="sm" variant="outline" onClick={retry}>
-                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Retry
-                </Button>
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="relative text-xs text-muted-foreground">
-            Preview unavailable. Download below.
-          </p>
+        <audio
+          ref={audioRef}
+          key={`${attempt}-${sources.length}`}
+          controls
+          preload="metadata"
+          className="relative w-full max-w-xs"
+          onCanPlay={() => setState("ready")}
+          onLoadedData={() => setState("ready")}
+          // Fires only when every <source> failed - fallback is automatic.
+          onError={() => setState("error")}
+        >
+          {sources.map((s) => (
+            <source key={s} src={s} />
+          ))}
+        </audio>
+        {state === "error" && (
+          <div className="relative flex flex-col items-center gap-2 text-center">
+            <p className="text-xs text-muted-foreground">
+              Preview unavailable. Download below.
+            </p>
+            <Button size="sm" variant="outline" onClick={retry}>
+              <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Retry
+            </Button>
+          </div>
         )}
       </div>
     </div>
@@ -221,28 +256,41 @@ function AudioPlayer({ thumbnail, title }: { thumbnail: string; title: string })
 
 /* --------------------------- Video player --------------------------- */
 
+/** Platforms that commonly block automated playback from a proxy. */
+const BLOCKY_PLAYBACK = new Set([
+  "x",
+  "facebook",
+  "instagram",
+  "tiktok",
+  "threads",
+  "soundcloud",
+  "vimeo",
+]);
+
+function playbackHint(platform: string): string {
+  if (BLOCKY_PLAYBACK.has(platform)) {
+    return "This platform often blocks playback from other sites. The download may still work.";
+  }
+  return "";
+}
+
 function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string }) {
   const { result } = usePulliqStore();
-  const mediaUrl = result?.mediaUrl;
+  const sources = usePlaybackSources();
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const [state, setState] = React.useState<"loading" | "ready" | "error">(
-    mediaUrl ? "loading" : "error"
+    sources.length ? "loading" : "error"
   );
-
-  const src = React.useMemo(() => {
-    if (!mediaUrl) return null;
-    return `/api/stream?u=${encodeURIComponent(mediaUrl)}`;
-  }, [mediaUrl]);
+  const [attempt, setAttempt] = React.useState(0);
 
   const retry = () => {
-    if (!videoRef.current || !src) return;
+    if (!videoRef.current || !sources.length) return;
     setState("loading");
-    // Force reload by re-setting src and calling load.
-    videoRef.current.src = src;
-    videoRef.current.load();
+    // Force reload by re-mounting the element via key.
+    setAttempt((a) => a + 1);
   };
 
-  if (!src) {
+  if (!sources.length) {
     return (
       <PreviewUnavailable
         thumbnail={thumbnail}
@@ -256,8 +304,7 @@ function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string })
     <div className="relative h-full w-full">
       <video
         ref={videoRef}
-        key={src}
-        src={src}
+        key={`${attempt}-${sources.length}`}
         className="h-full w-full bg-black object-contain"
         poster={thumbnail}
         controls
@@ -265,8 +312,14 @@ function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string })
         preload="auto"
         onLoadedData={() => setState("ready")}
         onCanPlay={() => setState("ready")}
+        // Fires only after every <source> failed - the browser falls back
+        // to the next source automatically on per-source errors.
         onError={() => setState("error")}
-      />
+      >
+        {sources.map((s) => (
+          <source key={s} src={s} />
+        ))}
+      </video>
 
       {/* Loading overlay */}
       {state === "loading" && (
@@ -291,6 +344,11 @@ function VideoPlayer({ thumbnail, title }: { thumbnail: string; title: string })
             <p className="max-w-xs text-xs text-muted-foreground">
               The video couldn&apos;t load for playback. You can still download it.
             </p>
+            {playbackHint(result.platform) && (
+              <p className="max-w-xs text-xs text-muted-foreground/80">
+                {playbackHint(result.platform)}
+              </p>
+            )}
             <div className="mt-1 flex gap-2">
               <Button size="sm" variant="default" onClick={retry}>
                 <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Retry

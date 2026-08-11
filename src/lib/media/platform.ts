@@ -14,6 +14,11 @@ export const PLATFORMS: PlatformInfo[] = [
   { id: "reddit", name: "Reddit", slug: "reddit-downloader", color: "#FF4500", domain: "reddit.com" },
   { id: "vimeo", name: "Vimeo", slug: "vimeo-downloader", color: "#19B7EA", domain: "vimeo.com" },
   { id: "dailymotion", name: "Dailymotion", slug: "dailymotion-downloader", color: "#0066DC", domain: "dailymotion.com" },
+  { id: "twitch", name: "Twitch", slug: "twitch-downloader", color: "#9146FF", domain: "twitch.tv" },
+  { id: "vk", name: "VK", slug: "vk-video-downloader", color: "#0077FF", domain: "vk.com" },
+  { id: "tumblr", name: "Tumblr", slug: "tumblr-downloader", color: "#34526F", domain: "tumblr.com" },
+  { id: "bandcamp", name: "Bandcamp", slug: "bandcamp-downloader", color: "#629AA9", domain: "bandcamp.com" },
+  { id: "rumble", name: "Rumble", slug: "rumble-video-downloader", color: "#85C742", domain: "rumble.com" },
 ];
 
 /** Platforms that yt-dlp cannot fetch (DRM-protected or unsupported). */
@@ -42,6 +47,12 @@ const HOST_MAP: Record<string, PlatformId> = {
   "vimeo.com": "vimeo",
   "dailymotion.com": "dailymotion",
   "dai.ly": "dailymotion",
+  "twitch.tv": "twitch",
+  "vk.com": "vk",
+  "vk.cc": "vk",
+  "tumblr.com": "tumblr",
+  "bandcamp.com": "bandcamp",
+  "rumble.com": "rumble",
   "open.spotify.com": "spotify",
   "spotify.com": "spotify",
   "music.apple.com": "apple-music",
@@ -63,6 +74,30 @@ export function detectPlatform(rawUrl: string): PlatformId {
 
 export function getPlatformInfo(id: PlatformId): PlatformInfo | undefined {
   return PLATFORMS.find((p) => p.id === id);
+}
+
+/**
+ * Detect the platform, following HTTP redirects when the host is unknown.
+ * Handles shorteners (t.co, lnkd.in, etc.) and link wrappers so the correct
+ * platform is reported and the right extractor strategy is used.
+ */
+export async function detectPlatformWithRedirect(rawUrl: string): Promise<PlatformId> {
+  const direct = detectPlatform(rawUrl);
+  if (direct !== "unknown") return direct;
+  try {
+    const res = await fetch(normalizeUrl(rawUrl), {
+      method: "HEAD",
+      redirect: "follow",
+      signal: AbortSignal.timeout(10_000),
+      headers: {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      },
+    });
+    return detectPlatform(res.url || normalizeUrl(rawUrl));
+  } catch {
+    return "unknown";
+  }
 }
 
 export function normalizeUrl(raw: string): string {

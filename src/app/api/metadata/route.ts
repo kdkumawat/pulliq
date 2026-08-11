@@ -7,11 +7,12 @@ import {
   isValidHttpUrl,
 } from "@/lib/media/platform";
 import { assertSafeUrl } from "@/lib/media/ssrf";
-import { extractMedia, type RawExtract } from "@/lib/media/extract";
+import { cookiesArgs, extractMedia, type RawExtract } from "@/lib/media/extract";
 import {
   buildMetadataForFile,
 } from "@/lib/media/metadata";
 import { PRIVACY_REMOVABLE } from "@/lib/media/clean";
+import { PROCESS_SEM } from "@/lib/media/concurrency";
 import { TMP_BASE, YT_DLP } from "@/lib/media/paths";
 
 export const runtime = "nodejs";
@@ -47,45 +48,49 @@ function getClientIp(req: Request): string {
 /* ---------- helpers ---------- */
 
 function runYtDlp(args: string[], timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(YT_DLP, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    let settled = false;
-    let timer: NodeJS.Timeout | null = null;
+  return PROCESS_SEM.run(
+    () =>
+      new Promise((resolve, reject) => {
+        const proc = spawn(YT_DLP, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let stderr = "";
+        let settled = false;
+        let timer: NodeJS.Timeout | null = null;
 
-    const finish = (err: Error | null) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      if (err) reject(err);
-      else resolve();
-    };
+        const finish = (err: Error | null) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (err) reject(err);
+          else resolve();
+        };
 
-    proc.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
-    proc.stdout.on("data", () => {
-      /* discard */
-    });
-    proc.on("error", (err) => finish(err));
-    proc.on("close", (code) => {
-      if (code === 0) finish(null);
-      else {
-        finish(
-          new Error(
-            `yt-dlp exited ${code}${stderr.trim() ? `: ${stderr.trim().slice(-400)}` : ""}`
-          )
-        );
-      }
-    });
+        proc.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+        proc.stdout.on("data", () => {
+          /* discard */
+        });
+        proc.on("error", (err) => finish(err));
+        proc.on("close", (code) => {
+          if (code === 0) finish(null);
+          else {
+            finish(
+              new Error(
+                `yt-dlp exited ${code}${stderr.trim() ? `: ${stderr.trim().slice(-400)}` : ""}`
+              )
+            );
+          }
+        });
 
-    timer = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
-      finish(new Error(`yt-dlp timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
+        timer = setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+          finish(new Error(`yt-dlp timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    timeoutMs + 20_000
+  );
 }
 
 async function cleanupOldFiles(): Promise<void> {
@@ -168,6 +173,7 @@ export async function POST(req: Request) {
         "best",
         "-o",
         outTemplate,
+        ...(await cookiesArgs()),
         url,
       ],
       DOWNLOAD_TIMEOUT_MS
