@@ -1,14 +1,49 @@
+import { spawn } from "node:child_process";
 import { NextResponse } from "next/server";
 import { assertSafeUrl } from "@/lib/media/ssrf";
+import { isHlsMediaUrl } from "@/lib/media/extract";
+import { PROCESS_SEM } from "@/lib/media/concurrency";
+import { FFMPEG } from "@/lib/media/paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+/** Max time a request waits in the global process queue before giving up. */
+const QUEUE_TIMEOUT_MS = 60_000;
+/** Safety cap for a single HLS remux stream (client usually closes earlier). */
+const STREAM_CAP_MS = 10 * 60 * 1000;
+
+/**
+ * Referer to send to a media CDN host. Several CDNs (twimg, fbcdn, ...) 403
+ * requests that do not carry a Referer from the owning site.
+ */
+function upstreamReferer(host: string): string {
+  if (/twimg\.com$/i.test(host) || /twitter\.com$/i.test(host) || /x\.com$/i.test(host)) {
+    return "https://x.com/";
+  }
+  if (/fbcdn\.net$/i.test(host) || /facebook\.com$/i.test(host)) {
+    return "https://www.facebook.com/";
+  }
+  if (/cdninstagram\.com$/i.test(host) || /instagram\.com$/i.test(host)) {
+    return "https://www.instagram.com/";
+  }
+  if (/tiktokcdn/i.test(host)) {
+    return "https://www.tiktok.com/";
+  }
+  return "";
+}
 
 /**
  * GET /api/stream?u=<encoded direct media url>
  *
  * Proxies a remote media URL back to the browser so that <video>/<audio>
- * elements can play it without CORS issues, with Range (seek) support.
+ * elements can play it without CORS issues. Two modes:
+ *  - HLS (.m3u8): remuxed on the fly to fragmented MP4 with ffmpeg, because
+ *    Chrome/Firefox cannot play HLS natively (this is why X/Twitter video
+ *    previews failed).
+ *  - Direct media: proxied byte-for-byte with Range (seek) support.
  * The URL is SSRF-validated before fetching.
  */
 export async function GET(req: Request) {
@@ -32,20 +67,153 @@ export async function GET(req: Request) {
     );
   }
 
-  // Forward Range header for seeking + a realistic UA (some CDNs require one).
+  if (isHlsMediaUrl(parsed.href)) {
+    return streamHls(parsed.href, upstreamReferer(parsed.hostname), req);
+  }
+  return proxyDirect(parsed.href, parsed.hostname, req);
+}
+
+/* ------------------------------------------------------------------ */
+/* HLS -> fragmented MP4 remux                                         */
+/* ------------------------------------------------------------------ */
+
+async function streamHls(
+  mediaUrl: string,
+  referer: string,
+  req: Request
+): Promise<Response> {
+  // Hold a process slot for the whole stream, not just the spawn.
+  await PROCESS_SEM.acquire(QUEUE_TIMEOUT_MS);
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      PROCESS_SEM.release();
+    }
+  };
+
+  const headers =
+    `User-Agent: ${UA}\r\n` + (referer ? `Referer: ${referer}\r\n` : "");
+  const proc = spawn(
+    FFMPEG,
+    [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-headers",
+      headers,
+      "-i",
+      mediaUrl,
+      "-c",
+      "copy",
+      // Fragmented MP4 streams from a pipe (faststart needs a seekable file).
+      "-movflags",
+      "frag_keyframe+empty_moov+default_base_moof",
+      "-f",
+      "mp4",
+      "pipe:1",
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] }
+  );
+
+  let stderr = "";
+  proc.stderr.on("data", (d: Buffer) => {
+    stderr += d.toString("utf8").slice(-2000);
+  });
+
+  let stdoutEnded = false;
+  const readable = new ReadableStream<Uint8Array>({
+    start(controller) {
+      proc.stdout.on("data", (d: Buffer) => {
+        controller.enqueue(new Uint8Array(d.buffer, d.byteOffset, d.byteLength));
+      });
+      proc.stdout.on("end", () => {
+        stdoutEnded = true;
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+        release();
+      });
+      proc.on("error", (err) => {
+        console.error("[stream] ffmpeg error:", err.message);
+        try {
+          controller.error(err);
+        } catch {
+          /* ignore */
+        }
+        release();
+      });
+      proc.on("close", (code) => {
+        if (!stdoutEnded) {
+          console.error("[stream] ffmpeg exited", code, stderr.trim().slice(-300));
+          try {
+            controller.error(new Error(`transcode failed (${code})`));
+          } catch {
+            /* ignore */
+          }
+        }
+        release();
+      });
+    },
+    cancel() {
+      killProc(proc);
+      release();
+    },
+  });
+
+  // Kill the remux when the client disconnects (no slot leaks).
+  const abort = () => {
+    killProc(proc);
+    release();
+  };
+  req.signal?.addEventListener("abort", abort, { once: true });
+
+  // Safety cap for hung remuxes.
+  const capTimer = setTimeout(() => {
+    killProc(proc);
+    release();
+  }, STREAM_CAP_MS);
+  capTimer.unref?.();
+
+  return new Response(readable, {
+    status: 200,
+    headers: {
+      "Content-Type": "video/mp4",
+      "Cache-Control": "no-store",
+      // No range support on a live remux - don't advertise it.
+      "Accept-Ranges": "none",
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* direct media proxy                                                  */
+/* ------------------------------------------------------------------ */
+
+async function proxyDirect(
+  mediaUrl: string,
+  host: string,
+  req: Request
+): Promise<Response> {
+  const forcedReferer = upstreamReferer(host);
   const upstreamHeaders: Record<string, string> = {
-    "user-agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "user-agent": UA,
     accept: "*/*",
   };
+  if (forcedReferer) upstreamHeaders["referer"] = forcedReferer;
+
+  // Forward Range header for seeking + a realistic UA (some CDNs require one).
   const range = req.headers.get("range");
   if (range) upstreamHeaders["range"] = range;
-  const referer = req.headers.get("referer");
-  if (referer) upstreamHeaders["referer"] = referer;
+  const browserReferer = req.headers.get("referer");
+  if (!forcedReferer && browserReferer) upstreamHeaders["referer"] = browserReferer;
 
   let upstream: Response;
   try {
-    upstream = await fetch(parsed.href, {
+    upstream = await fetch(mediaUrl, {
       headers: upstreamHeaders,
       redirect: "follow",
       // @ts-expect-error - Next.js fetch supports this duplex option for streaming.
@@ -78,7 +246,6 @@ export async function GET(req: Request) {
   if (!respHeaders.has("accept-ranges")) {
     respHeaders.set("accept-ranges", "bytes");
   }
-  // Allow the browser to cache the stream chunk for the session.
   respHeaders.set("cache-control", "public, max-age=3600");
 
   if (!upstream.body) {
@@ -88,10 +255,17 @@ export async function GET(req: Request) {
     );
   }
 
-  // Stream the upstream body straight through. Web ReadableStream is fine here.
   return new Response(upstream.body as unknown as BodyInit, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers: respHeaders,
   });
+}
+
+function killProc(proc: ReturnType<typeof spawn>): void {
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    /* ignore */
+  }
 }

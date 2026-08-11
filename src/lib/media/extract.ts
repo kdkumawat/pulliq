@@ -217,6 +217,16 @@ export function isImageMediaUrl(url?: string, ext?: string): boolean {
   return false;
 }
 
+/** True when a URL is an HLS stream (playable only via the remux proxy). */
+export function isHlsMediaUrl(url: string): boolean {
+  return /\.m3u8(\?|#|$)/i.test(url);
+}
+
+/** True when a URL is an MPEG-DASH manifest (not browser-playable). */
+function isDashMediaUrl(url: string): boolean {
+  return /\.mpd(\?|#|$)/i.test(url);
+}
+
 const DIRECT_IMAGE_EXT = /^(jpg|jpeg|png|webp|gif|avif|heic|bmp)$/i;
 const DIRECT_AUDIO_EXT = /^(m4a|mp3|ogg|oga|wav|aac|flac|opus)$/i;
 const DIRECT_VIDEO_EXT = /^(mp4|webm|mov|m4v)$/i;
@@ -255,11 +265,25 @@ export function pickBestMediaFormat(raw: RawExtract): RawFormat | undefined {
     (f) => !video.includes(f) && f.acodec && f.acodec !== "none"
   );
 
+  // Note: yt-dlp labels HLS formats "mp4" when the segments are mp4, so a
+  // naive ext check picks an .m3u8 URL as "progressive mp4" - which Chrome
+  // cannot play. Exclude HLS/DASH from the progressive tier.
   const progressive = video
-    .filter((f) => f.ext === "mp4" || (f.url ?? "").includes(".mp4"))
+    .filter(
+      (f) =>
+        !isHlsMediaUrl(f.url ?? "") &&
+        !isDashMediaUrl(f.url ?? "") &&
+        (f.ext === "mp4" || (f.url ?? "").includes(".mp4"))
+    )
     .sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
   if (progressive.length) return progressive[0];
 
+  // Direct playable video (HLS is fine too - the stream route remuxes it).
+  // DASH manifests are last resort (not browser-playable).
+  const playableVideo = video
+    .filter((f) => !isDashMediaUrl(f.url ?? ""))
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
+  if (playableVideo.length) return playableVideo[0];
   if (video.length) {
     return [...video].sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0];
   }

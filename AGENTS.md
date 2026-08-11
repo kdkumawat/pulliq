@@ -115,7 +115,7 @@ src/
       analyze/route.ts     # POST: extract media info
       download/route.ts    # POST: download media file
       metadata/route.ts    # POST: deep metadata from downloaded file
-      stream/route.ts      # GET: proxy media for in-browser playback
+      stream/route.ts      # GET: proxy media for in-browser playback (HLS remux)
     layout.tsx             # Root layout (fonts, theme, SEO metadata)
     page.tsx               # Single route - view orchestration
     icon.svg               # Favicon (Pulliq logo)

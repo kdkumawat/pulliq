@@ -240,7 +240,7 @@ Returns detailed metadata from a freshly downloaded file (not the URL-level meta
 
 ### `GET /api/stream?u=<encoded-url>`
 
-Proxies a remote media URL back to the browser so that `<video>` and `<audio>` elements can play it without CORS issues, with `Range` (seek) support. The source URL is SSRF-validated before fetching.
+Proxies a remote media URL back to the browser so that `<video>` and `<audio>` elements can play it without CORS issues, with `Range` (seek) support. HLS (`.m3u8`) sources - e.g. X/Twitter videos - are remuxed on the fly to fragmented MP4 with ffmpeg so Chrome/Firefox can play them. CDN-aware `Referer` headers are added for `video.twimg.com`, `fbcdn.net`, etc. The source URL is SSRF-validated before fetching.
 
 **Query parameters**
 
