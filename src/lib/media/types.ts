@@ -82,6 +82,12 @@ export interface AnalyzeResponse {
   url: string;
   /** Direct, playable media URL (best progressive format) for in-browser playback. */
   mediaUrl?: string;
+  /**
+   * Additional playable URLs in priority order (progressive mp4 first, then
+   * HLS, then audio). The player falls back to the next one automatically
+   * when a source fails to load, so a blocked CDN never dead-ends playback.
+   */
+  mediaUrls?: string[];
   formats: MediaFormat[];
   carousel?: CarouselItem[];
   metadata: MetaGroup[];

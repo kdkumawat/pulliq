@@ -7,6 +7,7 @@ import {
 } from "@/lib/media/platform";
 import {
   extractMedia,
+  isHlsMediaUrl,
   isImageMediaUrl,
   pickBestMediaFormat,
   type RawExtract,
@@ -80,6 +81,44 @@ function detectKind(raw: RawExtract, best?: RawFormat): MediaKind {
   if (isImage) return "image";
   if (raw.duration && !isImage) return "audio";
   return "unknown";
+}
+
+/**
+ * Build an ordered list of playable URLs for in-browser playback:
+ * progressive mp4 first (no remux needed), then HLS (remuxed by the stream
+ * route), then audio. The player falls back down this list automatically,
+ * so a blocked CDN source never dead-ends playback.
+ */
+function buildMediaUrls(raw: RawExtract): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (u?: string) => {
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    out.push(u);
+  };
+
+  const byHeight = (a: RawFormat, b: RawFormat) =>
+    (b.height ?? 0) - (a.height ?? 0);
+  const media = (raw.formats || []).filter((f) => !!f.url && !isImageMediaUrl(f.url, f.ext));
+  const videos = media.filter((f) => f.vcodec && f.vcodec !== "none");
+
+  // 1. Progressive mp4 (browser-native, streamed byte-for-byte).
+  videos
+    .filter((f) => !isHlsMediaUrl(f.url ?? "") && !/\.mpd/i.test(f.url ?? ""))
+    .sort(byHeight)
+    .forEach((f) => push(f.url));
+  // 2. HLS (remuxed to fragmented MP4 by the stream route).
+  videos
+    .filter((f) => isHlsMediaUrl(f.url ?? ""))
+    .sort(byHeight)
+    .forEach((f) => push(f.url));
+  // 3. Audio-only streams.
+  media
+    .filter((f) => !videos.includes(f) && f.acodec && f.acodec !== "none")
+    .forEach((f) => push(f.url));
+  push(raw.url);
+  return out;
 }
 
 function buildFormats(
@@ -209,99 +248,138 @@ export async function POST(req: Request) {
     );
   }
 
+  // SSRF guard - throws on private/loopback URLs (plain JSON error, pre-stream).
   try {
-    // SSRF guard - throws on private/loopback URLs.
     await assertSafeUrl(url);
-
-    const raw = await extractMedia(url);
-    const best = pickBestMediaFormat(raw);
-    const formats = buildFormats(raw, best);
-    const metadata = buildMetadataFromExtract(raw, platform, best);
-    const kind = detectKind(raw, best);
-
-    const info = getPlatformInfo(platform);
-
-    // When yt-dlp fails on a video-first platform and all we recovered is the
-    // page's og:image, be honest about it: it is a preview thumbnail, not the
-    // actual video (e.g. Vimeo requires login since 2026).
-    const VIDEO_FIRST = new Set<PlatformId>([
-      "youtube",
-      "youtube-music",
-      "vimeo",
-      "dailymotion",
-      "twitch",
-      "rumble",
-      "facebook",
-      "tiktok",
-      "threads",
-    ]);
-    const degradedToImage =
-      kind === "image" &&
-      raw.extractor === "og-image-fallback" &&
-      VIDEO_FIRST.has(platform);
-
-    const response: AnalyzeResponse = {
-      ok: true,
-      platform,
-      platformLabel: info?.name || "Unknown",
-      kind,
-      title: raw.title,
-      creator: raw.creator,
-      thumbnail: raw.thumbnail,
-      duration: raw.duration,
-      width: best?.width || raw.width,
-      height: best?.height || raw.height,
-      filesize: best?.filesize || raw.filesize,
-      url,
-      mediaUrl: best?.url || raw.url || undefined,
-      formats,
-      carousel: raw.carousel,
-      metadata,
-      social: {
-        caption: raw.description,
-        uploadDate: raw.uploadDate,
-        username: raw.uploader || raw.creator,
-        likes: raw.likeCount,
-        comments: raw.commentCount,
-        hashtags: extractHashtags(raw.description),
-        thumbnail: raw.thumbnail,
-        platform,
-      },
-      demo: false,
-      note: degradedToImage
-        ? "Only a preview thumbnail was found on this page. The full video may require login, be region-locked, or be blocked for automated access."
-        : undefined,
-      tookMs: Date.now() - startedAt,
-    };
-
-    incrementAnalyzes();
-
-    return NextResponse.json(response, {
-      headers: { "Cache-Control": "no-store" },
-    });
-  } catch (err) {
-    // Be honest: if we can't access the link, say so clearly - no fake content.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[analyze] extraction failed for ${url}:`, msg);
-
-    // Server saturated - tell the user to retry shortly, with a proper 503.
-    if (msg.includes("Server is busy")) {
-      return NextResponse.json(
-        { ok: false, platform, error: msg },
-        { status: 503, headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
-    const reason = friendlyFailureReason(msg, platform);
+  } catch {
     return NextResponse.json(
-      {
-        ok: false,
-        platform,
-        error: reason,
-      },
-      { status: 422, headers: { "Cache-Control": "no-store" } }
+      { ok: false, error: "URL is not allowed." },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
     );
   }
+
+  // Stream NDJSON progress events, then the final result or error.
+  return new Response(analyzeStream(url, platform, startedAt), {
+    headers: {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+/** Stream the analyze pipeline as NDJSON: progress events + result/error. */
+function analyzeStream(
+  url: string,
+  platform: PlatformId,
+  startedAt: number
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const emit = (ev: Record<string, unknown>) => {
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(ev) + "\n"));
+        } catch {
+          /* client disconnected */
+        }
+      };
+
+      try {
+        emit({ type: "progress", pct: 5, stage: "Checking link" });
+
+        const raw = await extractMedia(url, (stage, pct) =>
+          emit({ type: "progress", pct, stage })
+        );
+
+        emit({ type: "progress", pct: 86, stage: "Building preview" });
+        const best = pickBestMediaFormat(raw);
+        const playableUrls = buildMediaUrls(raw);
+        const formats = buildFormats(raw, best);
+        const metadata = buildMetadataFromExtract(raw, platform, best);
+        const kind = detectKind(raw, best);
+
+        const info = getPlatformInfo(platform);
+
+        // When yt-dlp fails on a video-first platform and all we recovered is
+        // the page's og:image, be honest about it: it is a preview thumbnail,
+        // not the actual video (e.g. Vimeo requires login since 2026).
+        const VIDEO_FIRST = new Set<PlatformId>([
+          "youtube",
+          "youtube-music",
+          "vimeo",
+          "dailymotion",
+          "twitch",
+          "rumble",
+          "facebook",
+          "tiktok",
+          "threads",
+        ]);
+        const degradedToImage =
+          kind === "image" &&
+          raw.extractor === "og-image-fallback" &&
+          VIDEO_FIRST.has(platform);
+
+        const response: AnalyzeResponse = {
+          ok: true,
+          platform,
+          platformLabel: info?.name || "Unknown",
+          kind,
+          title: raw.title,
+          creator: raw.creator,
+          thumbnail: raw.thumbnail,
+          duration: raw.duration,
+          width: best?.width || raw.width,
+          height: best?.height || raw.height,
+          filesize: best?.filesize || raw.filesize,
+          url,
+          mediaUrl: playableUrls[0],
+          mediaUrls: playableUrls.length > 1 ? playableUrls : undefined,
+          formats,
+          carousel: raw.carousel,
+          metadata,
+          social: {
+            caption: raw.description,
+            uploadDate: raw.uploadDate,
+            username: raw.uploader || raw.creator,
+            likes: raw.likeCount,
+            comments: raw.commentCount,
+            hashtags: extractHashtags(raw.description),
+            thumbnail: raw.thumbnail,
+            platform,
+          },
+          demo: false,
+          note: degradedToImage
+            ? "Only a preview thumbnail was found on this page. The full video may require login, be region-locked, or be blocked for automated access."
+            : undefined,
+          tookMs: Date.now() - startedAt,
+        };
+
+        incrementAnalyzes();
+        emit({ type: "progress", pct: 100, stage: "Done" });
+        emit({ type: "result", data: response });
+      } catch (err) {
+        // Be honest: if we can't access the link, say so clearly - no fake content.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[analyze] extraction failed for ${url}:`, msg);
+
+        if (msg.includes("Server is busy")) {
+          emit({ type: "error", error: msg, status: 503 });
+        } else {
+          emit({
+            type: "error",
+            error: friendlyFailureReason(msg, platform),
+            status: 422,
+          });
+        }
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  });
 }
 
 export async function GET() {

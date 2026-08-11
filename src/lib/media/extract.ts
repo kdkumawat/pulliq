@@ -139,17 +139,17 @@ function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
 let cookiesFileReady: Promise<string | null> | null = null;
 
 /**
- * Resolve yt-dlp cookies arguments so authenticated/locked content can be
- * fetched (YouTube/SoundCloud/Vimeo from datacenter IPs). Two ways:
+ * Resolve the cookies file used by yt-dlp/ffmpeg, or null when none is
+ * configured. Two ways:
  *  - YT_DLP_COOKIES: path to an existing Netscape-format cookies file
  *  - YT_DLP_COOKIES_CONTENT: full cookies.txt content pasted as an env var
  *    (Render-friendly - no file upload needed; written to a temp file on
  *    first use and cached for the process lifetime)
  */
-export async function cookiesArgs(): Promise<string[]> {
+export async function resolveCookiesFile(): Promise<string | null> {
   const file = process.env.YT_DLP_COOKIES;
   if (file && existsSync(file)) {
-    return ["--cookies", file];
+    return file;
   }
 
   const content = process.env.YT_DLP_COOKIES_CONTENT;
@@ -162,10 +162,14 @@ export async function cookiesArgs(): Promise<string[]> {
         return dest;
       })();
     }
-    const dest = await cookiesFileReady;
-    if (dest) return ["--cookies", dest];
+    return await cookiesFileReady;
   }
-  return [];
+  return null;
+}
+
+export async function cookiesArgs(): Promise<string[]> {
+  const file = await resolveCookiesFile();
+  return file ? ["--cookies", file] : [];
 }
 
 /* ------------------------------------------------------------------ */
@@ -452,6 +456,9 @@ async function buildStrategies(url: string): Promise<string[][]> {
   return strategies;
 }
 
+/** Progress callback: human stage label + 0-100 percentage. */
+export type ExtractProgress = (stage: string, pct: number) => void;
+
 /**
  * Extract media info from a URL via yt-dlp.
  *
@@ -459,12 +466,17 @@ async function buildStrategies(url: string): Promise<string[][]> {
  * meta tags (og:video / twitter:player:stream / og:image / JSON-LD). Direct
  * media file URLs (a bare .jpg/.mp4/.mp3 link) are handled without yt-dlp.
  * Throws a typed Error if everything fails. The caller is expected to
- * surface a friendly error on failure.
+ * surface a friendly error on failure. `onProgress` is invoked at stage
+ * changes so the UI can show a real progress percentage.
  */
-export async function extractMedia(url: string): Promise<RawExtract> {
+export async function extractMedia(
+  url: string,
+  onProgress?: ExtractProgress
+): Promise<RawExtract> {
   // Direct media file: no extractor needed, synthesize immediately.
   const direct = matchDirectMediaUrl(url);
   if (direct) {
+    onProgress?.("Preparing file", 90);
     const filename = decodeURIComponent(url.split("/").pop() ?? "")
       .replace(/\.[a-z0-9]+(\?.*)?$/i, "")
       .replace(/[-_]+/g, " ")
@@ -491,13 +503,19 @@ export async function extractMedia(url: string): Promise<RawExtract> {
 
   const strategies = await buildStrategies(url);
   let lastErr: Error | null = null;
+  const total = strategies.length;
 
-  for (const args of strategies) {
+  for (let i = 0; i < strategies.length; i++) {
+    onProgress?.(
+      `Fetching media info (attempt ${i + 1} of ${total})`,
+      15 + Math.round((i / total) * 50)
+    );
     try {
-      const out = await runYtDlp(args, EXTRACT_TIMEOUT_MS);
+      const out = await runYtDlp(strategies[i], EXTRACT_TIMEOUT_MS);
       const parsed = parseDumpOutput(out);
       if (!parsed.length) continue;
       const [main, ...rest] = parsed;
+      onProgress?.("Reading formats", 82);
       return mapToRawExtract(main, rest);
     } catch (err) {
       // If the server is saturated, fail fast - don't queue-wait for every
@@ -512,8 +530,12 @@ export async function extractMedia(url: string): Promise<RawExtract> {
   // Fallback: extract direct media from the page's meta tags. Handles
   // Twitter/X image posts, Pinterest pins, and pages where yt-dlp can't find
   // a video but the page exposes one via og:video or JSON-LD.
+  onProgress?.("Reading page preview", 72);
   const fallback = await tryMetaFallback(url);
-  if (fallback) return fallback;
+  if (fallback) {
+    onProgress?.("Preparing preview", 88);
+    return fallback;
+  }
 
   throw lastErr ?? new Error("Media extraction failed");
 }

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { NextResponse } from "next/server";
 import { assertSafeUrl } from "@/lib/media/ssrf";
-import { isHlsMediaUrl } from "@/lib/media/extract";
+import { isHlsMediaUrl, resolveCookiesFile } from "@/lib/media/extract";
 import { PROCESS_SEM } from "@/lib/media/concurrency";
 import { FFMPEG } from "@/lib/media/paths";
 
@@ -82,8 +82,28 @@ async function streamHls(
   referer: string,
   req: Request
 ): Promise<Response> {
-  // Hold a process slot for the whole stream, not just the spawn.
-  await PROCESS_SEM.acquire(QUEUE_TIMEOUT_MS);
+  // Hold a process slot for the whole stream, not just the spawn. If the
+  // queue is full, return an honest 503 instead of a broken stream.
+  try {
+    await PROCESS_SEM.acquire(QUEUE_TIMEOUT_MS);
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "Server is busy, please try again in a moment." },
+      { status: 503 }
+    );
+  }
+
+  // The client may have disconnected while we were queued. Already-aborted
+  // signals never fire 'once' listeners, so check explicitly to avoid
+  // spawning an orphan remux into a dead socket.
+  if (req.signal?.aborted) {
+    PROCESS_SEM.release();
+    return NextResponse.json(
+      { ok: false, error: "Request cancelled." },
+      { status: 499 }
+    );
+  }
+
   let released = false;
   const release = () => {
     if (!released) {
@@ -94,28 +114,32 @@ async function streamHls(
 
   const headers =
     `User-Agent: ${UA}\r\n` + (referer ? `Referer: ${referer}\r\n` : "");
-  const proc = spawn(
-    FFMPEG,
-    [
-      "-y",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-headers",
-      headers,
-      "-i",
-      mediaUrl,
-      "-c",
-      "copy",
-      // Fragmented MP4 streams from a pipe (faststart needs a seekable file).
-      "-movflags",
-      "frag_keyframe+empty_moov+default_base_moof",
-      "-f",
-      "mp4",
-      "pipe:1",
-    ],
-    { stdio: ["ignore", "pipe", "pipe"] }
-  );
+  const cookiesFile = await resolveCookiesFile();
+  const args = [
+    "-y",
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-headers",
+    headers,
+    // Keep one HTTP connection open so the headers above (Referer, UA) are
+    // also sent with every HLS segment request - CDNs like twimg 403
+    // segment fetches that drop the Referer.
+    "-http_persistent",
+    "1",
+    ...(cookiesFile ? ["-cookies", cookiesFile] : []),
+    "-i",
+    mediaUrl,
+    "-c",
+    "copy",
+    // Fragmented MP4 streams from a pipe (faststart needs a seekable file).
+    "-movflags",
+    "frag_keyframe+empty_moov+default_base_moof",
+    "-f",
+    "mp4",
+    "pipe:1",
+  ];
+  const proc = spawn(FFMPEG, args, { stdio: ["ignore", "pipe", "pipe"] });
 
   let stderr = "";
   proc.stderr.on("data", (d: Buffer) => {
@@ -225,6 +249,20 @@ async function proxyDirect(
     return NextResponse.json(
       { ok: false, error: "Could not reach the media source." },
       { status: 502 }
+    );
+  }
+
+  if (!upstream.ok) {
+    // Log blocked sources - the most common cause of "preview failed" is a
+    // CDN 403/404 (twimg, fbcdn, ... usually need login cookies). Pass the
+    // real status through (only 5xx collapse to 502); a 416 here is a
+    // normal out-of-range seek answer and must not be rewritten.
+    console.error(
+      `[stream] upstream ${upstream.status} for ${host} (referer: ${forcedReferer || "none"})`
+    );
+    return NextResponse.json(
+      { ok: false, error: `The media source returned ${upstream.status}.` },
+      { status: upstream.status >= 500 ? 502 : upstream.status }
     );
   }
 
