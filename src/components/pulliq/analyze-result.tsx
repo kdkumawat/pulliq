@@ -1,15 +1,26 @@
 "use client";
 
 import * as React from "react";
-import { ShieldCheck } from "lucide-react";
+import { Info, ShieldCheck } from "lucide-react";
 import { DownloadPanel } from "./download-panel";
 import { MediaPreview } from "./media-preview";
 import { MediaInfo } from "./media-info";
 import { MetadataSidebar } from "./metadata-sidebar";
+import { usePulliqStore } from "@/store/pulliq-store";
 
 export function AnalyzeResult() {
+  const { result } = usePulliqStore();
+  const note = result?.note;
   return (
     <div className="space-y-5">
+      {/* Honest note when extraction degraded (e.g. only a preview thumbnail was found) */}
+      {note && (
+        <div className="flex items-start gap-2.5 rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{note}</span>
+        </div>
+      )}
+
       {/* Row 1: Preview (left) + Download (right) - the main goal, side by side */}
       <div className="grid gap-5 lg:grid-cols-[1.6fr_1fr]">
         <MediaPreview />

@@ -30,6 +30,11 @@ Pulliq is built around three pillars:
 | Reddit | Yes |
 | Vimeo | Yes |
 | Dailymotion | Yes |
+| Twitch | Yes |
+| VK | Yes |
+| Tumblr | Yes |
+| Bandcamp | Yes |
+| Rumble | Yes |
 | Spotify | Rejected (DRM-protected, friendly message) |
 | Apple Music | Rejected (DRM-protected, friendly message) |
 
@@ -76,9 +81,16 @@ Spotify and Apple Music use DRM-protected streams that `yt-dlp` cannot fetch. Pu
 
 - **Node.js 18+** (tested on Node 24)
 - **Bun** - package manager and runtime
-- **yt-dlp** binary - for media extraction
-- **ffmpeg + ffprobe** - for transcoding and metadata
+- **yt-dlp** binary - for media extraction (or `bun run setup:binaries`)
+- **ffmpeg + ffprobe** - for transcoding and metadata (or `bun run setup:binaries`)
 - **exiftool** - bundled via the `exiftool-vendored` npm package (no system install needed)
+
+> On machines without system installs (e.g. Windows), fetch portable binaries:
+>
+> ```bash
+> bun run setup:binaries            # yt-dlp + ffmpeg into ./bin
+> bun run setup:binaries -- --force # re-download everything
+> ```
 
 ---
 
@@ -87,6 +99,9 @@ Spotify and Apple Music use DRM-protected streams that `yt-dlp` cannot fetch. Pu
 ```bash
 # Install dependencies
 bun install
+
+# Install media binaries (yt-dlp + ffmpeg) if not on PATH
+bun run setup:binaries
 
 # Start dev server (port 3000)
 bun run dev
@@ -109,7 +124,18 @@ For Docker deployment, see **[DEPLOYMENT.md](./DEPLOYMENT.md)**.
 
 ## Environment variables
 
-Copy `.env.example` to `.env` for local overrides. No environment variables are required for the core media flow when `yt-dlp` and `ffmpeg` are on `$PATH`.
+Copy `.env.example` to `.env` for local overrides. No environment variables are required for the core media flow when `yt-dlp` and `ffmpeg` are on `$PATH` (or in `./bin`).
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `YT_DLP_PATH` | `yt-dlp` | Path to yt-dlp binary |
+| `FFMPEG_PATH` | `ffmpeg` | Path to ffmpeg |
+| `FFPROBE_PATH` | `ffprobe` | Path to ffprobe |
+| `EXIFTOOL_PATH` | `node_modules/.../exiftool` | Path to exiftool |
+| `TMP_DIR` | OS temp + `/pulliq` | Temp download directory |
+| `YT_DLP_COOKIES` | - | Cookies file for locked/blocked content (YouTube datacenter IPs) |
+| `YT_DLP_PLAYER_CLIENT` | `default,-android_sdkless` | YouTube player clients to try |
+| `PULLIQ_PROCESS_LIMIT` | `2` | Max concurrent yt-dlp/ffmpeg processes (1-4) |
 
 ---
 

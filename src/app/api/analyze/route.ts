@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import {
-  detectPlatform,
+  detectPlatformWithRedirect,
   getPlatformInfo,
   isValidHttpUrl,
   UNSUPPORTED_PLATFORMS,
 } from "@/lib/media/platform";
-import { extractMedia, type RawExtract, type RawFormat } from "@/lib/media/extract";
+import {
+  extractMedia,
+  isImageMediaUrl,
+  pickBestMediaFormat,
+  type RawExtract,
+  type RawFormat,
+} from "@/lib/media/extract";
 import { buildMetadataFromExtract } from "@/lib/media/metadata";
 import { assertSafeUrl } from "@/lib/media/ssrf";
 import { incrementAnalyzes } from "@/lib/server-stats";
@@ -48,48 +54,31 @@ function extractHashtags(text?: string): string[] | undefined {
   return Array.from(new Set(matches)).slice(0, 12);
 }
 
-function pickBestFormat(raw: RawExtract): RawFormat | undefined {
-  if (!raw.formats.length) return undefined;
-  // Prefer progressive mp4 (has both vcodec + acodec, ext mp4) by height.
-  const progressive = raw.formats
-    .filter(
-      (f) =>
-        f.vcodec &&
-        f.acodec &&
-        f.vcodec !== "none" &&
-        f.acodec !== "none" &&
-        (f.ext === "mp4" || (f.url ?? "").includes(".mp4"))
-    )
-    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
-  return progressive[0] || raw.formats[0];
-}
-
 function detectKind(raw: RawExtract, best?: RawFormat): MediaKind {
   if (raw.carousel && raw.carousel.length > 0) return "carousel";
-  const hasVideoCodec =
-    (best?.vcodec && best.vcodec !== "none" && best.vcodec !== undefined) ||
-    (Array.isArray((raw as any).formats) &&
-      (raw as any).formats.some((f: RawFormat) => f.vcodec && f.vcodec !== "none"));
-  const hasAudioCodec =
-    (best?.acodec && best.acodec !== "none") ||
-    (Array.isArray((raw as any).formats) &&
-      (raw as any).formats.some((f: RawFormat) => f.acodec && f.acodec !== "none"));
-  const isImageUrl =
-    (best?.ext && /(jpg|jpeg|png|webp|gif)/i.test(best.ext)) ||
-    (best?.url ?? "").match(/\.(jpg|jpeg|png|webp|gif)(\?|$)/i) !== null;
 
-  // og-video-fallback extractor sets isVideo=true and the url is a direct mp4.
-  if (raw.isVideo === true && !isImageUrl) return "video";
-  // og-image-fallback extractor sets isVideo=false.
-  if (raw.isVideo === false && isImageUrl) return "image";
+  const mainUrl = best?.url || raw.url || "";
+  const anyVideoWithUrl = (raw.formats || []).some(
+    (f) => f.vcodec && f.vcodec !== "none" && !!f.url
+  );
+  const hasAudioCodec = (raw.formats || []).some(
+    (f) => f.acodec && f.acodec !== "none"
+  );
+  const isImage = isImageMediaUrl(mainUrl, best?.ext || raw.ext);
+
+  // Video wins whenever any format is an actual video with a direct URL.
+  // This prevents videos being misclassified as images when the "best"
+  // format picked by yt-dlp happens to be an audio-only or thumbnail format.
+  if (anyVideoWithUrl) return "video";
+  if (raw.isVideo === true && !isImage) return "video";
+  if (raw.isVideo === false && isImage) return "image";
 
   // Audio-only: has audio but no video stream.
-  if (hasAudioCodec && !hasVideoCodec && !isImageUrl) return "audio";
+  if (hasAudioCodec && !anyVideoWithUrl && !isImage) return "audio";
   if (raw.isVideo === false && hasAudioCodec) return "audio";
 
-  if (hasVideoCodec) return "video";
-  if (isImageUrl) return "image";
-  if (raw.duration && !isImageUrl) return "audio";
+  if (isImage) return "image";
+  if (raw.duration && !isImage) return "audio";
   return "unknown";
 }
 
@@ -203,7 +192,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const platform = detectPlatform(url);
+  const platform = await detectPlatformWithRedirect(url);
   const startedAt = Date.now();
 
   // Reject DRM-protected streaming platforms upfront with a clear message.
@@ -225,12 +214,32 @@ export async function POST(req: Request) {
     await assertSafeUrl(url);
 
     const raw = await extractMedia(url);
-    const best = pickBestFormat(raw);
+    const best = pickBestMediaFormat(raw);
     const formats = buildFormats(raw, best);
     const metadata = buildMetadataFromExtract(raw, platform, best);
     const kind = detectKind(raw, best);
 
     const info = getPlatformInfo(platform);
+
+    // When yt-dlp fails on a video-first platform and all we recovered is the
+    // page's og:image, be honest about it: it is a preview thumbnail, not the
+    // actual video (e.g. Vimeo requires login since 2026).
+    const VIDEO_FIRST = new Set<PlatformId>([
+      "youtube",
+      "youtube-music",
+      "vimeo",
+      "dailymotion",
+      "twitch",
+      "rumble",
+      "facebook",
+      "tiktok",
+      "threads",
+    ]);
+    const degradedToImage =
+      kind === "image" &&
+      raw.extractor === "og-image-fallback" &&
+      VIDEO_FIRST.has(platform);
+
     const response: AnalyzeResponse = {
       ok: true,
       platform,
@@ -259,6 +268,9 @@ export async function POST(req: Request) {
         platform,
       },
       demo: false,
+      note: degradedToImage
+        ? "Only a preview thumbnail was found on this page. The full video may require login, be region-locked, or be blocked for automated access."
+        : undefined,
       tookMs: Date.now() - startedAt,
     };
 
@@ -271,6 +283,15 @@ export async function POST(req: Request) {
     // Be honest: if we can't access the link, say so clearly - no fake content.
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[analyze] extraction failed for ${url}:`, msg);
+
+    // Server saturated - tell the user to retry shortly, with a proper 503.
+    if (msg.includes("Server is busy")) {
+      return NextResponse.json(
+        { ok: false, platform, error: msg },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
     const reason = friendlyFailureReason(msg, platform);
     return NextResponse.json(
       {
@@ -309,7 +330,24 @@ function friendlyFailureReason(msg: string, platform: string): string {
     return "This content isn't publicly accessible. Pulliq only works with public links.";
   }
   if (lower.includes("no video") || lower.includes("not found") || lower.includes("404")) {
+    // Platforms that aggressively block automated access often fail with
+    // 403/404 patterns even for valid public links - say so honestly.
+    const BLOCKY = new Set([
+      "tiktok",
+      "instagram",
+      "facebook",
+      "threads",
+      "soundcloud",
+      "linkedin",
+      "vimeo",
+    ]);
+    if (BLOCKY.has(platform as any)) {
+      return `${platName} blocked automated access or couldn't be reached from this server (some platforms block cloud/datacenter IPs). The link may also be private or removed.`;
+    }
     return "No media could be found at this link. Check that the URL is correct and public.";
+  }
+  if (lower.includes("busy")) {
+    return "The server is busy right now. Please wait a moment and try again.";
   }
   if (lower.includes("unexpected response") || lower.includes("blocked")) {
     return `${platName} blocked automated access to this link, so Pulliq couldn't fetch it. Try a different link or platform.`;

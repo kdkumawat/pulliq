@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAnalyticsStatus } from "@/lib/analytics-config";
+import { processQueueStats } from "@/lib/media/concurrency";
 import { getServerStats, incrementKeepAlivePings } from "@/lib/server-stats";
 
 export const runtime = "nodejs";
@@ -23,5 +24,6 @@ export async function GET(req: Request) {
       measurementIdHint: analytics.measurementIdHint,
     },
     stats: getServerStats(),
+    processes: processQueueStats(),
   });
 }

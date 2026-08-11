@@ -1,5 +1,5 @@
 import * as React from "react";
-import type { PlatformId } from "@/lib/media/platform";
+import type { PlatformId } from "@/lib/media/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -135,6 +135,51 @@ function LinkedInIcon({ className }: IconProps) {
   );
 }
 
+/** Twitch */
+function TwitchIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714z" />
+    </svg>
+  );
+}
+
+/** VK */
+function VkIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <path d="M12.785 16.241s.288-.032.436-.194c.136-.148.132-.427.132-.427s-.02-1.304.576-1.496c.588-.19 1.341 1.26 2.14 1.818.605.422 1.064.33 1.064.33l2.137-.03s1.117-.071.587-.964c-.043-.073-.308-.661-1.588-1.87-1.34-1.264-1.16-1.059.453-3.246.983-1.332 1.376-2.145 1.253-2.493-.117-.332-.84-.244-.84-.244l-2.406.015s-.178-.025-.31.056c-.13.079-.213.262-.213.262s-.382 1.02-.89 1.885c-1.073 1.824-1.502 1.92-1.677 1.808-.407-.263-.305-1.057-.305-1.62 0-1.764.267-2.5-.521-2.691-.262-.064-.454-.105-1.123-.112-.858-.009-1.583.003-1.993.204-.274.134-.486.433-.357.45.159.021.52.097.711.358.246.337.237 1.094.237 1.094s.142 2.085-.33 2.343c-.324.176-.77-.183-1.725-1.823-.489-.839-.86-1.768-.86-1.768s-.071-.175-.198-.271c-.154-.117-.37-.154-.37-.154l-2.286.015s-.343.01-.469.161c-.112.134-.009.411-.009.411s1.791 4.187 3.821 6.297c1.862 1.934 3.975 1.807 3.975 1.807z" />
+    </svg>
+  );
+}
+
+/** Tumblr */
+function TumblrIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <path d="M14.563 24c-5.093 0-7.031-3.756-7.031-6.411V9.747H5.116V6.648c3.63-1.313 4.512-4.596 4.71-6.469C9.84.051 9.941 0 9.999 0c.071 0 .523.027.523.027v5.325h3.738v3.395h-3.724v7.729c0 1.254.321 2.728 2.294 2.728.862.006 1.685-.258 2.257-.598l1.382 2.477c-.997.7-2.753 1.317-4.606 1.317z" />
+    </svg>
+  );
+}
+
+/** Bandcamp */
+function BandcampIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <path d="M0 18.75l7.437-13.5H24l-7.438 13.5H0z" />
+    </svg>
+  );
+}
+
+/** Rumble - play button mark */
+function RumbleIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden="true">
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1.4 6.4 6.4 3.6-6.4 3.6V8.4z" fillRule="evenodd" />
+    </svg>
+  );
+}
+
 /** Spotify */
 function SpotifyIcon({ className }: IconProps) {
   return (
@@ -177,6 +222,11 @@ const ICONS: Record<PlatformId, React.FC<IconProps>> = {
   reddit: RedditIcon,
   vimeo: VimeoIcon,
   dailymotion: DailymotionIcon,
+  twitch: TwitchIcon,
+  vk: VkIcon,
+  tumblr: TumblrIcon,
+  bandcamp: BandcampIcon,
+  rumble: RumbleIcon,
   spotify: SpotifyIcon,
   "apple-music": AppleMusicIcon,
   unknown: UnknownIcon,
@@ -201,6 +251,11 @@ const BRAND_COLOR: Record<PlatformId, string> = {
   reddit: "#FF4500",
   vimeo: "#19B7EA",
   dailymotion: "currentColor",
+  twitch: "#9146FF",
+  vk: "#0077FF",
+  tumblr: "#34526F",
+  bandcamp: "#629AA9",
+  rumble: "#85C742",
   spotify: "#1DB954",
   "apple-music": "#FA243C",
   unknown: "#71717A",

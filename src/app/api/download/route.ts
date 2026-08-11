@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import { promises as fs } from "node:fs";
+import { Readable } from "node:stream";
 import path from "node:path";
 import { isValidHttpUrl } from "@/lib/media/platform";
 import { assertSafeUrl } from "@/lib/media/ssrf";
@@ -9,6 +10,8 @@ import {
   stripImageMetadata,
   stripVideoMetadata,
 } from "@/lib/media/clean";
+import { extractFallbackMedia, matchDirectMediaUrl } from "@/lib/media/extract";
+import { PROCESS_SEM } from "@/lib/media/concurrency";
 import { FFMPEG, TMP_BASE, YT_DLP } from "@/lib/media/paths";
 import { incrementDownloads } from "@/lib/server-stats";
 
@@ -17,6 +20,14 @@ export const dynamic = "force-dynamic";
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const TRANSCODE_TIMEOUT_MS = 180_000;
 const FILE_TTL_MS = 10 * 60 * 1000;
+/** Max time a request waits in the global process queue before giving up. */
+const QUEUE_TIMEOUT_MS = 120_000;
+
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+/** Errors we are happy to surface to the user as-is. */
+class UserFacingError extends Error {}
 
 /* ---------- helpers ---------- */
 
@@ -25,37 +36,44 @@ function runProcess(
   args: string[],
   timeoutMs: number
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timer: NodeJS.Timeout | null = null;
+  return PROCESS_SEM.run(
+    () =>
+      new Promise((resolve, reject) => {
+        const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        let timer: NodeJS.Timeout | null = null;
 
-    const finish = (err: Error | null, result?: { stdout: string; stderr: string; code: number }) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      if (err) reject(err);
-      else resolve(result!);
-    };
+        const finish = (
+          err: Error | null,
+          result?: { stdout: string; stderr: string; code: number }
+        ) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (err) reject(err);
+          else resolve(result!);
+        };
 
-    proc.stdout.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
-    proc.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
-    proc.on("error", (err) => finish(err));
-    proc.on("close", (code) =>
-      finish(null, { stdout, stderr, code: code ?? -1 })
-    );
+        proc.stdout.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
+        proc.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+        proc.on("error", (err) => finish(err));
+        proc.on("close", (code) =>
+          finish(null, { stdout, stderr, code: code ?? -1 })
+        );
 
-    timer = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {
-        /* ignore */
-      }
-      finish(new Error(`${path.basename(cmd)} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
+        timer = setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+          finish(new Error(`${path.basename(cmd)} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    QUEUE_TIMEOUT_MS
+  );
 }
 
 /** Sanitize a filename: ASCII-safe, strip path separators and control chars. */
@@ -104,6 +122,8 @@ async function cleanupOldFiles(): Promise<void> {
 interface DownloadPlan {
   /** yt-dlp -f format spec */
   formatSpec: string;
+  /** optional yt-dlp --format-sort (e.g. prefer h264 so merges remux instead of re-encoding) */
+  sort?: string;
   /** target output ext after processing */
   outExt: string;
   /** mime type for the response */
@@ -128,8 +148,12 @@ function planForFormat(format: string): DownloadPlan | null {
       };
     case "mp4-1080":
       return {
-        // Try merged bestvideo+bestaudio up to 1080p, fall back to best.
-        formatSpec: "bv*[height<=1080]+ba/b[height<=1080]/best",
+        // Prefer a single-file progressive stream (no merge = no OOM). Only
+        // when the platform only offers separate video+audio streams do we
+        // fall back to a merge. The h264 format sort keeps merged streams
+        // mp4-native so the merge is a cheap remux, not a re-encode.
+        formatSpec: "b[height<=1080]/bv*[height<=1080]+ba/b[height<=1080]/best",
+        sort: "vcodec:h264,res,br",
         outExt: "mp4",
         mime: "video/mp4",
         kind: "video",
@@ -138,7 +162,8 @@ function planForFormat(format: string): DownloadPlan | null {
       };
     case "mp4-720":
       return {
-        formatSpec: "bv*[height<=720]+ba/b[height<=720]/best",
+        formatSpec: "b[height<=720]/bv*[height<=720]+ba/b[height<=720]/best",
+        sort: "vcodec:h264,res,br",
         outExt: "mp4",
         mime: "video/mp4",
         kind: "video",
@@ -147,7 +172,8 @@ function planForFormat(format: string): DownloadPlan | null {
       };
     case "mp4-480":
       return {
-        formatSpec: "bv*[height<=480]+ba/b[height<=480]/best",
+        formatSpec: "b[height<=480]/bv*[height<=480]+ba/b[height<=480]/best",
+        sort: "vcodec:h264,res,br",
         outExt: "mp4",
         mime: "video/mp4",
         kind: "video",
@@ -175,18 +201,17 @@ function planForFormat(format: string): DownloadPlan | null {
 async function downloadSource(
   url: string,
   workDir: string,
-  formatSpec: string
+  formatSpec: string,
+  formatSort?: string
 ): Promise<{ filePath: string; title: string }> {
   const outTemplate = path.join(workDir, "source.%(ext)s");
-  // --print captures the title in the same pass. --print implies --simulate,
-  // so we add --no-simulate to force the actual download. --merge-output-format
-  // ensures merged video+audio lands in a single mp4 container.
   const args = [
     "--no-warnings",
     "--no-playlist",
     "--no-simulate",
     "--merge-output-format",
     "mp4",
+    ...(formatSort ? ["--format-sort", formatSort] : []),
     "-f",
     formatSpec,
     "-o",
@@ -217,60 +242,55 @@ async function downloadSource(
   return { filePath: path.join(workDir, file), title };
 }
 
+/** Stream any remote URL to a local file. Returns false on failure. */
+async function streamUrlToFile(remoteUrl: string, filePath: string): Promise<boolean> {
+  try {
+    const res = await fetch(remoteUrl, {
+      headers: { "user-agent": UA },
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!res.ok) return false;
+    const out = createWriteStream(filePath);
+    await new Promise<void>((resolve, reject) => {
+      const body = res.body as unknown as NodeJS.ReadableStream;
+      Readable.fromWeb(body as any)
+        .pipe(out)
+        .on("finish", () => resolve())
+        .on("error", reject);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Fallback: download an image directly by extracting og:image from the page HTML.
- * Used when yt-dlp fails (e.g. Twitter/X image posts).
- * Returns { filePath, title, ext } or null if no image found.
+ * Fallback: download media directly from page meta tags (og:video,
+ * twitter:player:stream, og:image) or from a direct media file URL.
+ * Used when yt-dlp fails, e.g. Twitter/X image posts, Pinterest pins, or
+ * pages exposing a direct video URL. Streams to disk so large files never
+ * sit in memory.
  */
-async function downloadDirectImage(
+async function downloadDirectFallback(
   url: string,
   workDir: string
-): Promise<{ filePath: string; title: string; ext: string } | null> {
-  try {
-    // Fetch the page HTML.
-    const pageRes = await fetch(url, {
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        accept: "text/html,application/xhtml+xml",
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!pageRes.ok) return null;
-    const html = await pageRes.text();
-
-    // Extract og:image URL.
-    const imgMatch = /<meta\s+(?:property|name)=["'](?:og:image|twitter:image)(?::url)?["']\s+content=["']([^"']+)["']/i.exec(html);
-    if (!imgMatch || !imgMatch[1]) return null;
-    const imgUrl = imgMatch[1].trim();
-    if (!imgUrl.startsWith("http")) return null;
-
-    // Extract title.
-    const titleMatch = /<meta\s+property=["']og:title["']\s+content=["']([^"']*)["']/i.exec(html);
-    const siteMatch = /<meta\s+property=["']og:site_name["']\s+content=["']([^"']*)["']/i.exec(html);
-    const title = titleMatch?.[1] || siteMatch?.[1] || "image";
-
-    // Determine extension from URL.
-    const ext = imgUrl.match(/\.(jpg|jpeg|png|webp|gif)/i)?.[1]?.toLowerCase() || "jpg";
-
-    // Download the image.
-    const imgRes = await fetch(imgUrl, {
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!imgRes.ok) return null;
-    const buf = Buffer.from(await imgRes.arrayBuffer());
-    const filePath = path.join(workDir, `source.${ext}`);
-    await fs.writeFile(filePath, buf);
-
-    return { filePath, title, ext };
-  } catch {
-    return null;
+): Promise<{ filePath: string; title: string; ext: string; kind: string } | null> {
+  // The pasted link itself is a media file (e.g. https://x/y/photo.jpg).
+  const direct = matchDirectMediaUrl(url);
+  if (direct) {
+    const filePath = path.join(workDir, `source.${direct.ext}`);
+    const ok = await streamUrlToFile(url, filePath);
+    if (!ok) return null;
+    return { filePath, title: "Media", ext: direct.ext, kind: direct.kind };
   }
+
+  const fb = await extractFallbackMedia(url);
+  if (!fb) return null;
+
+  const filePath = path.join(workDir, `source.${fb.ext}`);
+  const ok = await streamUrlToFile(fb.url, filePath);
+  if (!ok) return null;
+  return { filePath, title: fb.title, ext: fb.ext, kind: fb.kind };
 }
 
 async function transcodeVideo(
@@ -290,6 +310,8 @@ async function transcodeVideo(
     "23",
     "-preset",
     "veryfast",
+    "-threads",
+    "2",
     "-c:a",
     "aac",
     "-b:a",
@@ -319,6 +341,8 @@ async function transcodeMp3(src: string, dest: string): Promise<void> {
     "-c:a",
     "libmp3lame",
     "-qscale:a",
+    "2",
+    "-threads",
     "2",
     dest,
   ];
@@ -410,25 +434,23 @@ export async function POST(req: Request) {
     let srcPath: string;
     let srcExt: string;
     try {
-      const result = await downloadSource(url, workDir, plan.formatSpec);
+      const result = await downloadSource(url, workDir, plan.formatSpec, plan.sort);
       srcPath = result.filePath;
       downloadTitle = result.title;
       srcExt = path.extname(srcPath).slice(1).toLowerCase();
     } catch (dlErr) {
-      // yt-dlp failed (e.g. Twitter image post). Try direct image fallback:
-      // fetch the page HTML, extract og:image, download the image directly.
-      if (format === "original" || format === "mp3-128") {
-        const imgResult = await downloadDirectImage(url, workDir);
-        if (imgResult) {
-          srcPath = imgResult.filePath;
-          downloadTitle = imgResult.title;
-          srcExt = imgResult.ext;
-        } else {
-          throw dlErr;
-        }
-      } else {
-        throw dlErr;
+      // yt-dlp failed (e.g. Twitter image post). Try the direct media
+      // fallback: page meta tags (og:video / og:image).
+      const fbResult = await downloadDirectFallback(url, workDir);
+      if (!fbResult) throw dlErr;
+      if (fbResult.kind === "image" && plan.transcode !== "none") {
+        throw new UserFacingError(
+          "This link contains an image, not video or audio. It can only be downloaded as the original file."
+        );
       }
+      srcPath = fbResult.filePath;
+      downloadTitle = fbResult.title;
+      srcExt = fbResult.ext;
     }
 
     // Step 2: process based on plan.
@@ -509,6 +531,20 @@ export async function POST(req: Request) {
 
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[download] failed:", msg);
+
+    if (err instanceof UserFacingError) {
+      return NextResponse.json(
+        { ok: false, error: err.message },
+        { status: 422, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    if (msg.includes("Server is busy")) {
+      return NextResponse.json(
+        { ok: false, error: msg },
+        { status: 503, headers: { "Cache-Control": "no-store" } }
+      );
+    }
 
     // If yt-dlp couldn't resolve/download (often the case for demo URLs or
     // platforms that block the sandbox), return a clear 409.

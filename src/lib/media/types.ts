@@ -14,6 +14,11 @@ export type PlatformId =
   | "youtube"
   | "youtube-music"
   | "soundcloud"
+  | "twitch"
+  | "vk"
+  | "tumblr"
+  | "bandcamp"
+  | "rumble"
   | "spotify"
   | "apple-music"
   | "unknown";

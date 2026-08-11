@@ -16,21 +16,31 @@ This document is addressed to AI agents (LLMs, coding assistants, autonomous cod
 
 ## Backend binaries
 
+Binaries resolve in this order: env override (`YT_DLP_PATH`, ...) -> local `bin/` (from `bun run setup:binaries`) -> PATH.
+
 | Binary | Location | Purpose |
 |--------|----------|---------|
-| `yt-dlp` | `/home/z/.venv/bin/yt-dlp` | Media extraction (metadata, formats, download) |
-| `ffmpeg` | `/usr/bin/ffmpeg` | Video transcoding, MP3 extraction |
-| `ffprobe` | `/usr/bin/ffprobe` | Video/audio metadata |
+| `yt-dlp` | env / `bin/` / PATH | Media extraction (metadata, formats, download) |
+| `ffmpeg` | env / `bin/` / PATH | Video transcoding, MP3 extraction |
+| `ffprobe` | env / `bin/` / PATH | Video/audio metadata |
 | `exiftool` | `node_modules/exiftool-vendored.pl/bin/exiftool` | Metadata stripping (clean copy) |
 | `sharp` | npm package | Image processing |
 
 ## Media extraction flow
 
 1. `POST /api/analyze` receives `{url}`, validates URL + SSRF, calls `extractMedia(url)`.
-2. `extractMedia` (in `src/lib/media/extract.ts`) runs `yt-dlp --dump-json` to get metadata.
-3. If yt-dlp fails (e.g. Twitter image posts), it falls back to `tryImageFallback(url)` which fetches the page HTML and extracts `og:image` meta tags. This handles image-only posts on X, Pinterest, and other platforms.
-4. The result is mapped to `RawExtract` and then to `AnalyzeResponse` with metadata groups and formats.
+2. `extractMedia` (in `src/lib/media/extract.ts`) runs `yt-dlp --dump-json`, trying **multiple strategies**: default player client, alternate `player_client` extractor args (YouTube), and IPv4-only, each gated by the global process semaphore. Cookies via `YT_DLP_COOKIES` are attached when configured.
+3. If every yt-dlp strategy fails, it falls back to `extractFallbackMedia(url)` which parses page meta tags: `og:video` / `twitter:player:stream` (direct videos), JSON-LD `VideoObject`, and `og:image` / `twitter:imageN` (images + carousels).
+4. The result is mapped to `RawExtract` and then to `AnalyzeResponse` with metadata groups and formats. Kind detection is **video-first**: any format with a video codec + direct URL wins, so videos are never rendered as images.
 5. If everything fails, returns a `422` with an honest error message (no fake content).
+
+## Download flow
+
+1. `POST /api/download` receives `{url, format, clean}`.
+2. Tries `downloadSource` (yt-dlp) first. Original uses `-f best` (single file, no merge); renditions prefer `b[height<=X]` progressive and only fall back to `bv*+ba` merging.
+3. If yt-dlp fails, tries `downloadDirectFallback` (extractFallbackMedia: og:video direct URL or og:image), streamed to disk.
+4. If `clean: true`, runs metadata stripping (exiftool for videos, sharp for images).
+5. Streams the file to the client with `Content-Disposition` attachment header.
 
 ## Download flow
 
@@ -42,12 +52,22 @@ This document is addressed to AI agents (LLMs, coding assistants, autonomous cod
 
 ## Memory constraints
 
-The dev server runs on a **4 GB** machine. Critical rules:
+Deployed instances run 512 MB (Render free) to 2 GB (Fly). Critical rules:
 
+- **All yt-dlp/ffmpeg spawns must go through the global semaphore** (`src/lib/media/concurrency.ts`, `PROCESS_SEM`). Never spawn a media process without acquiring it - concurrent subprocesses OOM small instances. `PULLIQ_PROCESS_LIMIT` (default 2) controls the cap.
 - Use `best` format selector for original video downloads (NOT `bv*+ba/b` which merges video+audio and can OOM).
+- ffmpeg transcodes are capped to 1-2 concurrent and always pass `-threads 2`.
 - Use `exiftool` (not `ffmpeg`) for video metadata stripping. `exiftool -all=` rewrites only the file header; ffmpeg re-encodes the entire stream.
 - Pre-warm API routes with a GET request before the first POST (avoids compile-time memory spike).
 - The browser (Chrome/Chromium) + dev server + yt-dlp + ffmpeg can exhaust memory. Close the browser when running heavy backend tests.
+
+## Extraction tuning env vars
+
+| Var | Purpose |
+|-----|---------|
+| `YT_DLP_COOKIES` | Netscape cookies file for locked/blocked content (YouTube datacenter IPs) |
+| `YT_DLP_PLAYER_CLIENT` | YouTube player clients (default `default,-android_sdkless`) |
+| `PULLIQ_PROCESS_LIMIT` | Max concurrent media processes (default 2) |
 
 ## Platform support
 
@@ -66,6 +86,11 @@ The dev server runs on a **4 GB** machine. Critical rules:
 | Reddit | Works | Video, images |
 | Vimeo | Works | Video |
 | Dailymotion | Works | Video |
+| Twitch | Works | Clips + VODs via yt-dlp |
+| VK | Works | Video, images |
+| Tumblr | Works | Images, GIFs, video |
+| Bandcamp | Works | Music tracks (audio) |
+| Rumble | Works | Video |
 | Spotify | Rejected (DRM) | Friendly 422 upfront |
 | Apple Music | Rejected (DRM) | Friendly 422 upfront |
 

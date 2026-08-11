@@ -80,9 +80,12 @@ export function MediaPreview() {
     );
   }
 
-  const isVideo = kind === "video";
-  const isImage = kind === "image";
+  // Unknown kind with a playable mediaUrl is still a video - try playback
+  // instead of rendering a static thumbnail (a common cause of "video shown
+  // as image" reports).
+  const isVideo = kind === "video" || (kind === "unknown" && !!result.mediaUrl);
   const isAudio = kind === "audio";
+  const isImage = kind === "image";
 
   return (
     <motion.div
@@ -96,7 +99,7 @@ export function MediaPreview() {
           <VideoPlayer thumbnail={thumbnail} title={title} />
         ) : isAudio ? (
           <AudioPlayer thumbnail={thumbnail} title={title} />
-        ) : (
+        ) : thumbnail ? (
           // Show the full original image - no cropping (object-contain).
           <img
             src={thumbnail}
@@ -104,6 +107,13 @@ export function MediaPreview() {
             className="h-full w-full object-contain"
             loading="eager"
           />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center">
+            <div className="flex flex-col items-center gap-2 text-muted-foreground/50">
+              <ImageIcon className="h-10 w-10" />
+              <span className="text-xs">No preview available</span>
+            </div>
+          </div>
         )}
 
         {/* Top-left platform chip */}
