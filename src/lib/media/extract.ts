@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
+import path from "node:path";
 import type { CarouselItem } from "./types";
 
-import { YT_DLP } from "./paths";
+import { TMP_BASE, YT_DLP } from "./paths";
 import { PROCESS_SEM } from "./concurrency";
 import { detectPlatform } from "./platform";
 
@@ -135,11 +136,34 @@ function runYtDlp(args: string[], timeoutMs: number): Promise<string> {
   );
 }
 
-/** Optional cookies file so authenticated/locked content can be fetched. */
-function cookiesArgs(): string[] {
-  const cookies = process.env.YT_DLP_COOKIES;
-  if (cookies && existsSync(cookies)) {
-    return ["--cookies", cookies];
+let cookiesFileReady: Promise<string | null> | null = null;
+
+/**
+ * Resolve yt-dlp cookies arguments so authenticated/locked content can be
+ * fetched (YouTube/SoundCloud/Vimeo from datacenter IPs). Two ways:
+ *  - YT_DLP_COOKIES: path to an existing Netscape-format cookies file
+ *  - YT_DLP_COOKIES_CONTENT: full cookies.txt content pasted as an env var
+ *    (Render-friendly - no file upload needed; written to a temp file on
+ *    first use and cached for the process lifetime)
+ */
+export async function cookiesArgs(): Promise<string[]> {
+  const file = process.env.YT_DLP_COOKIES;
+  if (file && existsSync(file)) {
+    return ["--cookies", file];
+  }
+
+  const content = process.env.YT_DLP_COOKIES_CONTENT;
+  if (content && content.trim()) {
+    if (!cookiesFileReady) {
+      cookiesFileReady = (async () => {
+        const dest = path.join(TMP_BASE, "cookies.txt");
+        await fs.mkdir(TMP_BASE, { recursive: true });
+        await fs.writeFile(dest, content, "utf8");
+        return dest;
+      })();
+    }
+    const dest = await cookiesFileReady;
+    if (dest) return ["--cookies", dest];
   }
   return [];
 }
@@ -365,7 +389,7 @@ function mapToRawExtract(info: any, slides: any[]): RawExtract {
 /* ------------------------------------------------------------------ */
 
 /** Build ordered yt-dlp arg strategies for a URL. */
-function buildStrategies(url: string): string[][] {
+async function buildStrategies(url: string): Promise<string[][]> {
   const platform = detectPlatform(url);
   const base = [
     "--no-warnings",
@@ -374,7 +398,7 @@ function buildStrategies(url: string): string[][] {
     "--dump-json",
     url,
   ];
-  const ck = cookiesArgs();
+  const ck = await cookiesArgs();
 
   const strategies: string[][] = [[...base, ...ck]];
 
@@ -441,7 +465,7 @@ export async function extractMedia(url: string): Promise<RawExtract> {
     };
   }
 
-  const strategies = buildStrategies(url);
+  const strategies = await buildStrategies(url);
   let lastErr: Error | null = null;
 
   for (const args of strategies) {

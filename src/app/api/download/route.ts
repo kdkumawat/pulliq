@@ -10,7 +10,7 @@ import {
   stripImageMetadata,
   stripVideoMetadata,
 } from "@/lib/media/clean";
-import { extractFallbackMedia, matchDirectMediaUrl } from "@/lib/media/extract";
+import { cookiesArgs, extractFallbackMedia, matchDirectMediaUrl } from "@/lib/media/extract";
 import { PROCESS_SEM } from "@/lib/media/concurrency";
 import { FFMPEG, TMP_BASE, YT_DLP } from "@/lib/media/paths";
 import { incrementDownloads } from "@/lib/server-stats";
@@ -218,6 +218,7 @@ async function downloadSource(
     outTemplate,
     "--print",
     "after_move:%(title)s",
+    ...(await cookiesArgs()),
     url,
   ];
   const { stdout, stderr, code } = await runProcess(

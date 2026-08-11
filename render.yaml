@@ -13,3 +13,14 @@ services:
         value: production
       - key: HOSTNAME
         value: 0.0.0.0
+      # Render free tier is 512 MB: one media process at a time and a capped
+      # Node heap (overrides the Dockerfile default of 768 MB).
+      - key: PULLIQ_PROCESS_LIMIT
+        value: "1"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=256"
+      # Secrets - set these in the Render dashboard (Environment -> Secret File):
+      #   GA_MEASUREMENT_ID          - Google Analytics 4 measurement id (optional)
+      #   YT_DLP_COOKIES_CONTENT     - cookies.txt content for YouTube/SoundCloud/Vimeo
+      #                                from datacenter IPs (export from a fresh
+      #                                incognito browser session)

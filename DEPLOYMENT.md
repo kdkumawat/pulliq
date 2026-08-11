@@ -178,6 +178,20 @@ Copy `.env.example` to `.env` for local overrides. None are required if binaries
 | `EXIFTOOL_PATH` | `node_modules/exiftool-vendored.pl/bin/exiftool` | Path to exiftool |
 | `TMP_DIR` | OS temp dir + `/pulliq` | Temp download directory |
 | `PORT` | `3000` | HTTP port |
+| `YT_DLP_COOKIES` | - | Path to a cookies.txt file (locked/blocked content) |
+| `YT_DLP_COOKIES_CONTENT` | - | Full cookies.txt content as env var - no file upload needed on Render |
+| `YT_DLP_PLAYER_CLIENT` | `default,-android_sdkless` | YouTube player clients to try |
+| `PULLIQ_PROCESS_LIMIT` | `2` | Max concurrent media processes (1-4); set `1` on 512 MB instances |
+| `NODE_OPTIONS` | set in Docker | Node heap cap (e.g. `--max-old-space-size=256` on 512 MB) |
+
+### Render (free tier) checklist
+
+The `render.yaml` blueprint already sets `NODE_ENV`, `HOSTNAME`, `PULLIQ_PROCESS_LIMIT=1`, and a capped Node heap. Add these in the Render dashboard (**Environment** tab) as needed:
+
+1. `YT_DLP_COOKIES_CONTENT` (**important for YouTube/SoundCloud/Vimeo**) - paste the full contents of a cookies.txt file exported from a fresh incognito browser session logged into the site. Mark it as a **secret**. Render free instances use datacenter IPs that these platforms aggressively block; cookies are the main unlock.
+2. `GA_MEASUREMENT_ID` - optional, enables Google Analytics (see below).
+
+Everything else has safe defaults.
 
 ## Memory considerations
 

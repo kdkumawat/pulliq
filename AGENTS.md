@@ -65,9 +65,10 @@ Deployed instances run 512 MB (Render free) to 2 GB (Fly). Critical rules:
 
 | Var | Purpose |
 |-----|---------|
-| `YT_DLP_COOKIES` | Netscape cookies file for locked/blocked content (YouTube datacenter IPs) |
+| `YT_DLP_COOKIES` | Path to a Netscape cookies file for locked/blocked content |
+| `YT_DLP_COOKIES_CONTENT` | Full cookies.txt content as an env var (Render-friendly; written to a temp file on first use) |
 | `YT_DLP_PLAYER_CLIENT` | YouTube player clients (default `default,-android_sdkless`) |
-| `PULLIQ_PROCESS_LIMIT` | Max concurrent media processes (default 2) |
+| `PULLIQ_PROCESS_LIMIT` | Max concurrent media processes (default 2; use 1 on 512 MB instances) |
 
 ## Platform support
 

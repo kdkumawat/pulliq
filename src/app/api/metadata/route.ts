@@ -7,7 +7,7 @@ import {
   isValidHttpUrl,
 } from "@/lib/media/platform";
 import { assertSafeUrl } from "@/lib/media/ssrf";
-import { extractMedia, type RawExtract } from "@/lib/media/extract";
+import { cookiesArgs, extractMedia, type RawExtract } from "@/lib/media/extract";
 import {
   buildMetadataForFile,
 } from "@/lib/media/metadata";
@@ -173,6 +173,7 @@ export async function POST(req: Request) {
         "best",
         "-o",
         outTemplate,
+        ...(await cookiesArgs()),
         url,
       ],
       DOWNLOAD_TIMEOUT_MS

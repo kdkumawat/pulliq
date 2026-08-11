@@ -133,9 +133,10 @@ Copy `.env.example` to `.env` for local overrides. No environment variables are 
 | `FFPROBE_PATH` | `ffprobe` | Path to ffprobe |
 | `EXIFTOOL_PATH` | `node_modules/.../exiftool` | Path to exiftool |
 | `TMP_DIR` | OS temp + `/pulliq` | Temp download directory |
-| `YT_DLP_COOKIES` | - | Cookies file for locked/blocked content (YouTube datacenter IPs) |
+| `YT_DLP_COOKIES` | - | Path to a cookies.txt file for locked/blocked content |
+| `YT_DLP_COOKIES_CONTENT` | - | Full cookies.txt content as an env var (Render-friendly, no file upload) |
 | `YT_DLP_PLAYER_CLIENT` | `default,-android_sdkless` | YouTube player clients to try |
-| `PULLIQ_PROCESS_LIMIT` | `2` | Max concurrent yt-dlp/ffmpeg processes (1-4) |
+| `PULLIQ_PROCESS_LIMIT` | `2` | Max concurrent yt-dlp/ffmpeg processes (1-4); use `1` on 512 MB instances |
 
 ---
 
